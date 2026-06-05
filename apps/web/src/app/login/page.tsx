@@ -105,9 +105,6 @@ function LoginForm() {
       >
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Video Scoring</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Sign in to the admin dashboard.
-          </p>
         </div>
 
         {error ? (
@@ -187,13 +184,10 @@ function LoginForm() {
             table, and issues the right kind of session cookie based
             on which one matches. The previous "Continue as guest"
             anonymous-access button was removed — it bypassed the
-            per-main scoping that hotel77/vnm/etc. need. */}
-        <p className="text-[11px] leading-snug text-slate-500">
-          Admins enter their account credentials. Guests enter the
-          per-main credentials provided by an admin (e.g.{" "}
-          <code className="rounded bg-slate-100 px-1">hotel77</code>) —
-          they&apos;ll see read-only submissions for that one main only.
-        </p>
+            per-main scoping that hotel77/vnm/etc. need. The visible
+            help text under the form was removed at the operator's
+            request for a cleaner UI; this comment stays so future
+            readers know guest-vs-admin lookup is single-form. */}
       </form>
     </div>
   );
