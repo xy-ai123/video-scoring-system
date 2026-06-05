@@ -41,6 +41,24 @@ const nextConfig = {
     ].join("; ");
     return [
       {
+        // No-cache directive for /login specifically. The login page is
+        // a "use client" component so we can't reach for `export const
+        // dynamic = "force-dynamic"` to disable Next's static
+        // optimisation directly. Without it the page picks up the
+        // global `s-maxage=31536000` and Safari heuristically caches it
+        // — operators see stale copy text for hours after a deploy.
+        // `no-store` tells both browsers and any intermediate proxy to
+        // re-fetch every time. Login is low-volume + cheap, so the
+        // re-fetch cost is negligible.
+        source: "/login",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "no-store, no-cache, must-revalidate, max-age=0",
+          },
+        ],
+      },
+      {
         source: "/(.*)",
         headers: [
           { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
