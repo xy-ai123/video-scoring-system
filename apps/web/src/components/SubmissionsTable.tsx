@@ -1204,9 +1204,64 @@ export function SubmissionsTable({
       ) : (
         <>
           {/* Mobile: stacked cards. Each card is a single tap target — no
-              horizontal scrolling required. Visible on screens < md (768px). */}
+              horizontal scrolling required. Visible on screens < md (768px).
+
+              Iteration is `groupedByMain.flatMap` (NOT `filtered.map`) so the
+              mobile view gets the same `Hotel 77 (48) ⌄` group headers that
+              the desktop table has. State (expandedMains + toggleMainExpanded)
+              is shared between the two views — collapsing on mobile reflects
+              on desktop and vice versa. */}
           <ul className="space-y-2 md:hidden">
-            {filtered.map((r) => {
+            {groupedByMain.flatMap((group) => {
+              // Same gate as the desktop table: hide group headers when
+              // there's only one group (single-main filter) — the header
+              // would be redundant clutter on a small screen.
+              const showHeader =
+                mainFilter === "ALL" && groupedByMain.length > 1;
+              const isExpanded =
+                !showHeader || expandedMains.has(group.label);
+              const headerLi = showHeader ? (
+                <li
+                  key={`m-hdr-${group.label}`}
+                  className="rounded-lg bg-indigo-50/60"
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleMainExpanded(group.label)}
+                    aria-expanded={isExpanded}
+                    aria-controls={`mobile-main-body-${group.label}`}
+                    title={
+                      isExpanded
+                        ? `Collapse ${group.label}`
+                        : `Expand ${group.label}`
+                    }
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-indigo-700"
+                  >
+                    <ChevronRight
+                      className={
+                        "h-3 w-3 transition-transform " +
+                        (isExpanded ? "rotate-90" : "")
+                      }
+                    />
+                    <span>{group.label}</span>
+                    <span className="font-normal text-indigo-500">
+                      ({group.rows.length})
+                    </span>
+                    {!isExpanded ? (
+                      <span className="ml-2 text-[10px] font-normal text-indigo-400">
+                        tap to expand
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              ) : null;
+              // Collapsed: emit just the header. Body cards skipped to
+              // keep the DOM small on phones (every card has nested
+              // labels + state) — matches the desktop body-skip rule.
+              if (!isExpanded) {
+                return headerLi ? [headerLi] : [];
+              }
+              const rowLis = group.rows.map((r) => {
               const isSelected = selected.has(r.id);
               return (
               <li
@@ -1341,6 +1396,8 @@ export function SubmissionsTable({
                 </Link>
               </li>
               );
+              });
+              return headerLi ? [headerLi, ...rowLis] : rowLis;
             })}
           </ul>
 
