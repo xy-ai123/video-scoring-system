@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
+import { getAdminWithPasswordPlain } from "@/lib/adminUser";
 import { CredentialsForm } from "./CredentialsForm";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +19,12 @@ export const dynamic = "force-dynamic";
 export default async function AdminSettingsPage() {
   const user = await getCurrentUser();
   if (!user || user.role !== "admin") redirect("/login");
+
+  // Look up the admin row to get the plaintext password mirror. Null if
+  // the row was created via a code path that didn't store the plaintext
+  // (e.g. legacy seeded rows pre-dating the column). The CredentialsForm
+  // renders "—" in that case.
+  const adminRow = await getAdminWithPasswordPlain(user.username);
 
   return (
     <div className="space-y-6">
@@ -41,7 +48,10 @@ export default async function AdminSettingsPage() {
         </p>
       </div>
 
-      <CredentialsForm currentUsername={user.username} />
+      <CredentialsForm
+        currentUsername={user.username}
+        currentPasswordPlain={adminRow?.passwordPlain ?? null}
+      />
     </div>
   );
 }

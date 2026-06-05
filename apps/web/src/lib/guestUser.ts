@@ -105,6 +105,9 @@ export async function seedGuestUsers(): Promise<boolean> {
       data: {
         username: g.username,
         passwordHash: hash,
+        // Mirror plaintext for /admin/guests display. See schema.prisma
+        // passwordPlain comment for the security note.
+        passwordPlain: g.password,
         allowedMain: g.allowedMain,
       },
     });
@@ -160,12 +163,27 @@ export async function verifyGuestPassword(
 // Admin-facing CRUD (called from /api/admin/guests routes).
 // ---------------------------------------------------------------------------
 
-/** Return all guest rows sorted by username for a stable UI order. */
+/** Return all guest rows sorted by username for a stable UI order.
+ *  Includes passwordPlain so /admin/guests can display it; null when
+ *  the row was seeded before the column existed and the operator
+ *  hasn't changed the password since (UI shows "—" in that case). */
 export async function listGuests(): Promise<
-  { id: string; username: string; allowedMain: string; updatedAt: Date }[]
+  {
+    id: string;
+    username: string;
+    allowedMain: string;
+    passwordPlain: string | null;
+    updatedAt: Date;
+  }[]
 > {
   return prisma.guestUser.findMany({
-    select: { id: true, username: true, allowedMain: true, updatedAt: true },
+    select: {
+      id: true,
+      username: true,
+      allowedMain: true,
+      passwordPlain: true,
+      updatedAt: true,
+    },
     orderBy: { username: "asc" },
   });
 }
@@ -214,7 +232,13 @@ export async function createGuest(input: {
   const passwordHash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
   try {
     const row = await prisma.guestUser.create({
-      data: { username, passwordHash, allowedMain },
+      data: {
+        username,
+        passwordHash,
+        // Mirror plaintext for /admin/guests display.
+        passwordPlain: input.password,
+        allowedMain,
+      },
       select: { id: true, username: true, allowedMain: true },
     });
     invalidateGuestCache();
@@ -246,12 +270,16 @@ export async function updateGuest(
   const data: {
     username?: string;
     passwordHash?: string;
+    passwordPlain?: string;
     allowedMain?: string;
   } = {};
   if (patch.newUsername !== undefined) data.username = validateUsername(patch.newUsername);
   if (patch.newPassword !== undefined) {
     validatePassword(patch.newPassword);
     data.passwordHash = await bcrypt.hash(patch.newPassword, BCRYPT_ROUNDS);
+    // Mirror plaintext on every password change so the /admin/guests
+    // column stays in sync.
+    data.passwordPlain = patch.newPassword;
   }
   if (patch.newAllowedMain !== undefined) {
     data.allowedMain = validateAllowedMain(patch.newAllowedMain);

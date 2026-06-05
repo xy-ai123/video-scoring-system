@@ -36,10 +36,14 @@ export default async function AdminGuestsPage() {
 
   // Strip Date instances to ISO strings so the server-rendered payload
   // doesn't fail the "non-plain-object passed to Client Component" rule.
+  // passwordPlain may be null on legacy rows whose plaintext wasn't
+  // recoverable — pass through as-is so the UI can render "—" for that
+  // case.
   const safeGuests = guests.map((g) => ({
     id: g.id,
     username: g.username,
     allowedMain: g.allowedMain,
+    passwordPlain: g.passwordPlain,
     updatedAt: g.updatedAt.toISOString(),
   }));
 

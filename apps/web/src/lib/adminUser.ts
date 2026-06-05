@@ -104,7 +104,13 @@ export async function seedAdminUser(): Promise<boolean> {
   if (count > 0) return false;
   const hash = await bcrypt.hash(INITIAL_PASSWORD, BCRYPT_ROUNDS);
   await prisma.adminUser.create({
-    data: { username: INITIAL_USERNAME, passwordHash: hash },
+    data: {
+      username: INITIAL_USERNAME,
+      passwordHash: hash,
+      // Mirror the plaintext so /admin/settings can display it. See
+      // schema.prisma's passwordPlain comment for the security note.
+      passwordPlain: INITIAL_PASSWORD,
+    },
   });
   return true;
 }
@@ -163,7 +169,11 @@ export async function updateAdminCredentials(
   userId: string,
   patch: { newUsername?: string; newPassword?: string },
 ): Promise<{ username: string }> {
-  const data: { username?: string; passwordHash?: string } = {};
+  const data: {
+    username?: string;
+    passwordHash?: string;
+    passwordPlain?: string;
+  } = {};
 
   if (patch.newUsername !== undefined) {
     const u = patch.newUsername.trim().toLowerCase();
@@ -188,6 +198,8 @@ export async function updateAdminCredentials(
       throw new Error("Password is too long (max 200 characters).");
     }
     data.passwordHash = await bcrypt.hash(patch.newPassword, BCRYPT_ROUNDS);
+    // Keep the plaintext mirror in sync — see schema.prisma comment.
+    data.passwordPlain = patch.newPassword;
   }
 
   if (Object.keys(data).length === 0) {
@@ -232,6 +244,33 @@ export async function findAdminByUsername(
   const row = await prisma.adminUser.findUnique({
     where: { username: username.trim().toLowerCase() },
     select: { id: true, username: true },
+  });
+  return row;
+}
+
+/** Fetch the admin row WITH the plaintext password mirror, looked up by
+ *  username (case-insensitive). Used by /admin/settings so the
+ *  operator can see and copy their current password. Returns null if
+ *  the username doesn't resolve to a live row — the caller decides
+ *  what to do (the settings page just shows "—").
+ *
+ *  Username lookup matches the rest of the file: lowercased + trimmed.
+ *  Username is what the session cookie carries (payload.sub), so this
+ *  is the natural lookup key for the page.
+ *
+ *  passwordPlain is nullable (legacy rows or rows changed via a code
+ *  path that didn't write it). The settings UI shows "—" when null.
+ */
+export async function getAdminWithPasswordPlain(
+  username: string,
+): Promise<{
+  id: string;
+  username: string;
+  passwordPlain: string | null;
+} | null> {
+  const row = await prisma.adminUser.findUnique({
+    where: { username: username.trim().toLowerCase() },
+    select: { id: true, username: true, passwordPlain: true },
   });
   return row;
 }

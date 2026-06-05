@@ -16,7 +16,17 @@ import { Save } from "lucide-react";
  *   - all three boxes are independent — user can change just username,
  *     just password, or both in one save
  */
-export function CredentialsForm({ currentUsername }: { currentUsername: string }) {
+export function CredentialsForm({
+  currentUsername,
+  currentPasswordPlain,
+}: {
+  currentUsername: string;
+  /** Plaintext mirror of the admin's current password. Null only on
+   *  legacy rows whose plaintext wasn't recoverable — the panel shows
+   *  "—" in that case until the admin saves a new password once. See
+   *  schema.prisma's AdminUser.passwordPlain comment. */
+  currentPasswordPlain: string | null;
+}) {
   const router = useRouter();
 
   const [currentPassword, setCurrentPassword] = useState("");
@@ -118,6 +128,29 @@ export function CredentialsForm({ currentUsername }: { currentUsername: string }
           {success}
         </div>
       ) : null}
+
+      {/* Current-credentials panel (option A — plaintext always visible).
+          Mirrors the /admin/guests "Password" column for the admin row,
+          so the operator can see what their current password is without
+          having to reset it. Null plaintext shows "—" (legacy rows). */}
+      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="font-medium text-slate-700">Current username</span>
+          <code className="rounded bg-white px-1.5 py-0.5 font-mono text-[12px] text-slate-800 ring-1 ring-slate-200">
+            {currentUsername}
+          </code>
+        </div>
+        <div className="mt-1.5 flex items-baseline justify-between gap-3">
+          <span className="font-medium text-slate-700">Current password</span>
+          {currentPasswordPlain ? (
+            <code className="rounded bg-white px-1.5 py-0.5 font-mono text-[12px] text-slate-800 ring-1 ring-slate-200">
+              {currentPasswordPlain}
+            </code>
+          ) : (
+            <span className="text-slate-400">—</span>
+          )}
+        </div>
+      </div>
 
       <div>
         <label

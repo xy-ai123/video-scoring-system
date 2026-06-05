@@ -171,6 +171,14 @@ model AdminUser {
   // pulling in a citext column type.
   username     String   @unique
   passwordHash String
+  // Plaintext mirror of the password. Kept in sync with passwordHash on
+  // every create/update so the /admin/settings page can display the
+  // current password. SECURITY: this is a deliberate regression for
+  // operator convenience — bcrypt is one-way, so showing the password
+  // requires storing it. Login still verifies against passwordHash, not
+  // this column. Null only for rows seeded before this column existed
+  // whose plaintext we couldn't recover (the UI shows "—" in that case).
+  passwordPlain String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -195,6 +203,11 @@ model GuestUser {
   id           String   @id @default(cuid())
   username     String   @unique
   passwordHash String
+  // See AdminUser.passwordPlain — same purpose, same trade-off. Lets
+  // admins see and copy the guest's password on /admin/guests without
+  // having to reset it. Null only for rows seeded before this column
+  // existed whose plaintext we couldn't recover.
+  passwordPlain String?
   allowedMain  String
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
