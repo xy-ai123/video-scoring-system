@@ -790,9 +790,12 @@ export function SubmissionsTable({
             </>
           ) : null}
           {/* Third filter dimension: top-level Drive folder. Only render
-              when we actually know any mains — when knownMains is empty
-              this whole strip just disappears (no separator, no chips). */}
-          {knownMains.length > 0 ? (
+              when we actually know any mains AND the viewer is an admin —
+              guests are scoped to a single main already (server-side
+              filter on /admin), so the chip row would either show one
+              redundant chip ("their main") or be misleading. Admin view
+              unchanged. */}
+          {!readOnly && knownMains.length > 0 ? (
             <>
               <span
                 className="mx-1 h-5 w-px bg-slate-300"
