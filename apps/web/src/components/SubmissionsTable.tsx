@@ -386,6 +386,30 @@ export function SubmissionsTable({
     })) satisfies Group[];
   }, [filtered, mainFilter]);
 
+  // Precomputed option list for the Main filter <select>. Stable across
+  // re-renders driven by other filter chips (status/clip/search) because
+  // it depends only on `knownMains` (a prop) and `hasNullMainRows` (a
+  // boolean derived from props).
+  //
+  // Why this exists: Safari's native <select> menu can get stuck "open"
+  // when the option list mutates mid-interaction — e.g. clicking the
+  // Unclipped chip triggers a SubmissionsTable re-render, React
+  // re-evaluates a conditional `{cond ? <option/> : null}` inside the
+  // select, and Safari's already-open OS menu detaches from the DOM
+  // node. Stable options + no inline conditional children = no detach.
+  const hasNullMainRows = useMemo(
+    () => rows.some((r) => r.main == null),
+    [rows],
+  );
+  const mainSelectOptions = useMemo(() => {
+    const opts: { value: string; label: string }[] = [
+      { value: "ALL", label: "All mains" },
+    ];
+    for (const m of knownMains) opts.push({ value: m, label: m });
+    if (hasNullMainRows) opts.push({ value: "Other", label: "Other" });
+    return opts;
+  }, [knownMains, hasNullMainRows]);
+
   // Approved / rejected rate over the non-status-chip-filtered population.
   // Stays informative even when the operator clicks the APPROVED or
   // REJECTED chip (otherwise approved% would be a trivial 100% / 0%).
@@ -873,15 +897,16 @@ export function SubmissionsTable({
                     : "border-indigo-500 bg-indigo-50 text-indigo-700")
                 }
               >
-                <option value="ALL">All mains</option>
-                {knownMains.map((m) => (
-                  <option key={`opt-${m}`} value={m}>
-                    {m}
+                {/* Children come from a memoized array — no inline
+                    conditionals inside <select>. Fixes a Safari quirk
+                    where the native menu would freeze open if the option
+                    list mutated while it was visible (which happened on
+                    every chip click before this change). */}
+                {mainSelectOptions.map((o) => (
+                  <option key={`opt-${o.value}`} value={o.value}>
+                    {o.label}
                   </option>
                 ))}
-                {rows.some((r) => r.main == null) ? (
-                  <option value="Other">Other</option>
-                ) : null}
               </select>
             </>
           ) : null}
