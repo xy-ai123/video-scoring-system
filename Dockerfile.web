@@ -30,4 +30,12 @@ ENV NODE_ENV=production
 COPY --from=builder /app /app
 
 EXPOSE 3000
-CMD ["pnpm", "-F", "web", "start", "-p", "3000"]
+# Apply any pending Prisma migrations before starting the Next.js server.
+# Why bake it into CMD: cloud platforms (Railway, Fly.io, Render) don't have a
+# pre-start hook by default. The alternative — running `prisma migrate deploy`
+# manually after every deploy via a Console — is fragile and easy to forget.
+# `migrate deploy` is idempotent (no-op when there's nothing pending), so the
+# overhead on a clean container start is ~1-2s.
+# If migrations fail, the container exits without starting next, which is the
+# right behavior — a broken schema should fail loud, not serve stale data.
+CMD ["sh", "-c", "pnpm -F @vss/db prisma migrate deploy && pnpm -F web start -p 3000"]
