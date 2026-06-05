@@ -24,6 +24,7 @@ loadDotenv({ path: "../../.env", override: false });
 import { prisma } from "@vss/db";
 import { getDriveClient } from "../services/drive.js";
 import {
+  ingestFolderFast,
   ingestFromDriveFolder,
   softDeleteMissingDriveSubmissions,
 } from "../services/driveFolderIngest.js";
@@ -87,29 +88,39 @@ async function runOnce() {
   // that live in another folder we just haven't scanned yet (the bug
   // that wiped 9 newly-uploaded VPM0166/VPM0167 videos before this fix).
   const unionDriveFileIds = new Set<string>();
+
+  // ─── PHASE 1: fast pass ────────────────────────────────────────────────
+  // Insert new VideoFile rows + mirror Drive-side renames/mime/size + sync
+  // folder-name drift. Skips the slow stuff (duration measurement, sheet
+  // sync). Goal: every dashboard-visible state change (new file, rename,
+  // folder rename, new main folder discovered) lands within ~30-45s,
+  // safely under Railway's 60s subprocess timeout.
+  // ───────────────────────────────────────────────────────────────────────
+  let phase1Renamed = 0;
+  let phase1CategoriesUpdated = 0;
   for (const folder of folders) {
     try {
-      const s = await ingestFromDriveFolder(folder.id, {
-        skipSoftDelete: true,
-      });
+      const s = await ingestFolderFast(folder.id);
       rawTotals.foldersWalked += 1;
       rawTotals.scanned += s.scanned;
       rawTotals.ingested += s.ingested;
-      rawTotals.durationsBackfilled += s.durationsBackfilled;
       rawTotals.errors += s.errors;
+      phase1Renamed += s.renamed;
+      phase1CategoriesUpdated += s.categoriesUpdated;
       for (const id of s.driveFileIds) unionDriveFileIds.add(id);
     } catch (err) {
       rawTotals.errors += 1;
       const message = err instanceof Error ? err.message : String(err);
       logger.error(
         { folder: folder.name, folderId: folder.id, errMessage: message },
-        "syncFromSharedDrive: raw ingest error",
+        "syncFromSharedDrive: phase-1 ingest error",
       );
     }
   }
-  // One aggregated soft-delete pass using the union of *all* shared
-  // folders' current contents. Now a video that exists in folder B is
-  // safe from being soft-deleted by the loop's pass over folder A.
+  // Soft-delete pass uses the union of every folder's current IDs, so
+  // it's safe to run after phase 1 even though phase 2 hasn't started.
+  // (Soft-delete only looks at "is this file's id present in the union?",
+  // it doesn't depend on duration / sheet sync.)
   try {
     rawTotals.softDeleted = await softDeleteMissingDriveSubmissions(
       unionDriveFileIds,
@@ -122,6 +133,38 @@ async function runOnce() {
       { errMessage: message },
       "syncFromSharedDrive: aggregated soft-delete failed",
     );
+  }
+  logger.info(
+    {
+      ...rawTotals,
+      phase1Renamed,
+      phase1CategoriesUpdated,
+    },
+    "syncFromSharedDrive: phase 1 (fast) done",
+  );
+
+  // ─── PHASE 2: slow tail ────────────────────────────────────────────────
+  // Backfill `durationSec` for rows still missing it + run sheet sync.
+  // May get SIGTERM'd by Railway before completing; that's acceptable —
+  // the next sync tick picks up where this one left off (both operations
+  // are idempotent and bounded by their own "needs work?" predicates).
+  // Phase 1 already handled every user-visible state change, so a
+  // mid-folder kill here is invisible to operators.
+  // ───────────────────────────────────────────────────────────────────────
+  for (const folder of folders) {
+    try {
+      const s = await ingestFromDriveFolder(folder.id, {
+        skipSoftDelete: true,
+      });
+      rawTotals.durationsBackfilled += s.durationsBackfilled;
+    } catch (err) {
+      rawTotals.errors += 1;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { folder: folder.name, folderId: folder.id, errMessage: message },
+        "syncFromSharedDrive: phase-2 backfill error",
+      );
+    }
   }
   logger.info(rawTotals, "syncFromSharedDrive: raw videos done");
 

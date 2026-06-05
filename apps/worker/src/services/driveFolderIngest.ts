@@ -695,6 +695,179 @@ export async function softDeleteMissingDriveSubmissions(
   return deleted;
 }
 
+/**
+ * Fast-path ingest summary: subset of IngestSummary holding only the
+ * fields the fast pass produces. Mirrors driveFileIds + newSubmissionIds
+ * so the multi-folder caller can union them across folders for the
+ * aggregated soft-delete.
+ */
+export type FastIngestSummary = {
+  folderId: string;
+  scanned: number;
+  foldersWalked: number;
+  ingested: number;
+  /** Number of VideoFile rows whose Drive-side fileName/mimeType/sizeBytes
+   *  changed and were mirrored back this pass. */
+  renamed: number;
+  /** Drive-ingested submissions whose `driveFolderName` was kept in sync
+   *  with the file's parent folder name. */
+  categoriesUpdated: number;
+  errors: number;
+  driveFileIds: string[];
+  newSubmissionIds: string[];
+};
+
+/**
+ * Fast-path ingest for a single folder. Three things only:
+ *   1. INSERT new VideoFile rows (no duration measurement — the scoring
+ *      queue picks them up async, and the slow tail pass backfills
+ *      `durationSec` later)
+ *   2. Mirror Drive-side metadata drift (fileName / mimeType / sizeBytes)
+ *      back into existing rows
+ *   3. Sync `driveFolderName` for drive-ingested rows whose parent
+ *      folder changed name (pure DB update, cheap)
+ *
+ * Skips: duration measurement, sheet sync, soft-delete. Those run in the
+ * slow tail pass after Phase 1 has covered every folder.
+ *
+ * Why this exists: Railway kills the sync subprocess at ~60s. Inline
+ * duration measurement (~5-10s per new file, Drive HEAD + ffprobe) means
+ * late-alphabet folders never get touched. This pass finishes in
+ * ~0.5-1s per folder so all 45 folders fit comfortably inside the
+ * 60s budget — and renames + new files land reliably on every tick.
+ *
+ * Same INSERT path as ingestFromDriveFolder (calls the same ingestOne)
+ * so newly-inserted rows are identical down to the audit log entry.
+ */
+export async function ingestFolderFast(
+  folderId: string,
+): Promise<FastIngestSummary> {
+  const log = logger.child({ folderId, phase: "fast" });
+  const { files, foldersWalked } = await listVideosRecursively(folderId);
+  log.info(
+    { scanned: files.length, foldersWalked },
+    "drive folder ingest (fast): listed",
+  );
+
+  const currentDriveIds = new Set(files.map((f) => f.id));
+
+  const knownRows =
+    files.length === 0
+      ? []
+      : await prisma.videoFile.findMany({
+          where: { driveFileId: { in: files.map((f) => f.id) } },
+          select: {
+            id: true,
+            driveFileId: true,
+            fileName: true,
+            mimeType: true,
+            sizeBytes: true,
+            submissionId: true,
+            submission: {
+              select: { driveFolderName: true, responseId: true },
+            },
+          },
+        });
+  const knownByDriveId = new Map(knownRows.map((r) => [r.driveFileId, r]));
+  const parentByDriveId = new Map(
+    knownRows.map((r) => [
+      r.driveFileId,
+      {
+        submissionId: r.submissionId,
+        currentDriveFolderName: r.submission.driveFolderName,
+        responseId: r.submission.responseId,
+      },
+    ]),
+  );
+
+  const fresh = files.filter((f) => !knownByDriveId.has(f.id));
+  const knownNeedingMetaRefresh = files.filter((f) => {
+    const r = knownByDriveId.get(f.id);
+    if (!r) return false;
+    if (r.fileName !== f.name) return true;
+    if ((r.mimeType ?? null) !== (f.mimeType ?? null)) return true;
+    const driveSize: bigint | null = f.size ? BigInt(f.size) : null;
+    const dbSize: bigint | null = r.sizeBytes ?? null;
+    return driveSize !== dbSize;
+  });
+  const knownNeedingCategory = files.filter((f) => {
+    const p = parentByDriveId.get(f.id);
+    return (
+      p != null &&
+      p.responseId.startsWith("drive-") &&
+      p.currentDriveFolderName !== f.parentFolderName
+    );
+  });
+
+  let errors = 0;
+  const newSubmissionIds: string[] = [];
+
+  // 1. Insert new rows — NO duration measurement. The slow-tail pass
+  //    (ingestFromDriveFolder) will fill durationSec on the next pass
+  //    via its existing "knownNeedingDuration" backfill loop.
+  for (const f of fresh) {
+    try {
+      const res = await ingestOne(f, folderId);
+      if (!res) continue;
+      newSubmissionIds.push(res.submissionId);
+    } catch (err) {
+      errors += 1;
+      log.error(
+        {
+          driveFileId: f.id,
+          fileName: f.name,
+          errMessage: err instanceof Error ? err.message : String(err),
+        },
+        "drive folder ingest (fast): insert failed",
+      );
+    }
+  }
+
+  // 2. Metadata refresh (rename / mime / size)
+  let renamed = 0;
+  if (knownNeedingMetaRefresh.length > 0) {
+    renamed = await syncFileMetadata(
+      knownNeedingMetaRefresh,
+      knownByDriveId,
+      log,
+    );
+  }
+
+  // 3. Folder-name sync (cheap pure-DB update — pulled forward so a Drive
+  //    folder rename also lands inside the 60s budget)
+  let categoriesUpdated = 0;
+  if (knownNeedingCategory.length > 0) {
+    categoriesUpdated = await syncCategories(
+      knownNeedingCategory,
+      parentByDriveId,
+      log,
+    );
+  }
+
+  log.info(
+    {
+      scanned: files.length,
+      ingested: newSubmissionIds.length,
+      renamed,
+      categoriesUpdated,
+      errors,
+    },
+    "drive folder ingest (fast): done",
+  );
+
+  return {
+    folderId,
+    scanned: files.length,
+    foldersWalked,
+    ingested: newSubmissionIds.length,
+    renamed,
+    categoriesUpdated,
+    errors,
+    driveFileIds: Array.from(currentDriveIds),
+    newSubmissionIds,
+  };
+}
+
 export async function ingestFromDriveFolder(
   folderId: string = DEFAULT_DRIVE_INGEST_FOLDER_ID,
   options: {
