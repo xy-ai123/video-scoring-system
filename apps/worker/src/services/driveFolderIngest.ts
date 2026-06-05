@@ -47,8 +47,10 @@ export type IngestSummary = {
    *  whose duration we filled in during this run. Bookkeeping so the user
    *  can tell whether the watcher is making forward progress. */
   durationsBackfilled: number;
-  /** VideoFile rows whose `fileName` we updated because the corresponding
-   *  Drive file was renamed since the last sync. */
+  /** VideoFile rows whose Drive-side metadata (fileName, mimeType, or
+   *  sizeBytes) drifted since the last sync and was mirrored back in. The
+   *  field keeps its historical "renamed" name for back-compat with
+   *  callers; rename is the common-case trigger. */
   renamed: number;
   /** Drive-ingested submissions whose `category` we updated because the
    *  file's immediate parent folder changed name OR the row was created
@@ -331,58 +333,90 @@ async function fillDurationFor(
 }
 
 /**
- * Rename sync: if Drive renamed a file, mirror the new name into
- * VideoFile.fileName. Idempotent. Scope intentionally broad — both
- * drive-ingested and form-submitted rows are renamed, since the rename is
- * a pure display change and there's no admin decision to clobber.
+ * Metadata sync: when Drive's copy of a known file has drifted, mirror the
+ * new fileName / mimeType / sizeBytes into VideoFile. Idempotent — only
+ * fields that actually changed are written, so re-runs are no-ops. Scope
+ * intentionally broad: both drive-ingested and form-submitted rows are
+ * refreshed, since these are pure metadata changes and don't clobber any
+ * admin decision (scores, status, category, audit log are untouched).
+ *
+ * Audit payload only includes the fields that changed, so the log stays
+ * tight and grep-able. BigInt size is stringified for JSON safety.
  */
-async function syncFileNames(
+async function syncFileMetadata(
   files: DriveVideoFile[],
   knownByDriveId: Map<
     string,
-    { id: string; fileName: string; submissionId?: string }
+    {
+      id: string;
+      fileName: string;
+      mimeType: string | null;
+      sizeBytes: bigint | null;
+      submissionId?: string;
+    }
   >,
   log: typeof logger,
 ): Promise<number> {
-  let renamed = 0;
+  let updated = 0;
   for (const f of files) {
     const row = knownByDriveId.get(f.id);
     if (!row) continue;
-    if (row.fileName === f.name) continue;
+    const driveSize: bigint | null = f.size ? BigInt(f.size) : null;
+    const dbSize: bigint | null = row.sizeBytes ?? null;
+    const data: {
+      fileName?: string;
+      mimeType?: string | null;
+      sizeBytes?: bigint | null;
+    } = {};
+    const payloadDiff: Record<string, string | null> = {};
+    if (row.fileName !== f.name) {
+      data.fileName = f.name;
+      payloadDiff.previousName = row.fileName;
+      payloadDiff.newName = f.name;
+    }
+    if ((row.mimeType ?? null) !== (f.mimeType ?? null)) {
+      data.mimeType = f.mimeType ?? null;
+      payloadDiff.previousMimeType = row.mimeType ?? null;
+      payloadDiff.newMimeType = f.mimeType ?? null;
+    }
+    if (driveSize !== dbSize) {
+      data.sizeBytes = driveSize;
+      payloadDiff.previousSizeBytes = dbSize == null ? null : dbSize.toString();
+      payloadDiff.newSizeBytes = driveSize == null ? null : driveSize.toString();
+    }
+    if (Object.keys(data).length === 0) continue;
     try {
       await prisma.$transaction(async (tx) => {
         const before = await tx.videoFile.findUnique({
           where: { id: row.id },
-          select: { fileName: true, submissionId: true },
+          select: { submissionId: true },
         });
         if (!before) return;
         await tx.videoFile.update({
           where: { id: row.id },
-          data: { fileName: f.name },
+          data,
         });
         await tx.auditLog.create({
           data: {
             actor: "driveFolderIngest",
-            action: "submission.rename.drive_sync",
+            action: "submission.metadata.drive_sync",
             target: before.submissionId,
             payload: {
               videoFileId: row.id,
               driveFileId: f.id,
-              previousName: before.fileName,
-              newName: f.name,
+              ...payloadDiff,
             },
           },
         });
       });
-      renamed += 1;
+      updated += 1;
       log.info(
         {
           videoFileId: row.id,
           driveFileId: f.id,
-          previousName: row.fileName,
-          newName: f.name,
+          changedFields: Object.keys(data),
         },
-        "drive sync: file renamed",
+        "drive sync: metadata refreshed",
       );
     } catch (err) {
       log.error(
@@ -391,11 +425,11 @@ async function syncFileNames(
           driveFileId: f.id,
           errMessage: err instanceof Error ? err.message : String(err),
         },
-        "drive sync: rename failed",
+        "drive sync: metadata refresh failed",
       );
     }
   }
-  return renamed;
+  return updated;
 }
 
 /**
@@ -701,6 +735,11 @@ export async function ingestFromDriveFolder(
             driveFileId: true,
             durationSec: true,
             fileName: true,
+            // mimeType + sizeBytes are pulled so the metadata-refresh diff
+            // below can spot Drive-side changes (re-encode, replace-in-place,
+            // mimeType correction) without an extra query per file.
+            mimeType: true,
+            sizeBytes: true,
             submissionId: true,
             submission: {
               select: {
@@ -730,9 +769,18 @@ export async function ingestFromDriveFolder(
     const r = knownByDriveId.get(f.id);
     return r != null && r.durationSec == null;
   });
-  const knownNeedingRename = files.filter((f) => {
+  // Metadata-refresh diff: pick up Drive-side changes to fileName, mimeType,
+  // OR sizeBytes. Renaming a file in Drive is the common case; replace-in-
+  // place (same Drive file id, new contents) bumps size; mimeType corrections
+  // happen when Drive belatedly re-detects a previously-unknown container.
+  const knownNeedingMetaRefresh = files.filter((f) => {
     const r = knownByDriveId.get(f.id);
-    return r != null && r.fileName !== f.name;
+    if (!r) return false;
+    if (r.fileName !== f.name) return true;
+    if ((r.mimeType ?? null) !== (f.mimeType ?? null)) return true;
+    const driveSize: bigint | null = f.size ? BigInt(f.size) : null;
+    const dbSize: bigint | null = r.sizeBytes ?? null;
+    return driveSize !== dbSize;
   });
   const knownNeedingCategory = files.filter((f) => {
     const p = parentByDriveId.get(f.id);
@@ -748,7 +796,7 @@ export async function ingestFromDriveFolder(
       alreadyKnown: knownRows.length,
       toIngest: fresh.length,
       knownMissingDuration: knownNeedingDuration.length,
-      knownNeedingRename: knownNeedingRename.length,
+      knownNeedingMetaRefresh: knownNeedingMetaRefresh.length,
       knownNeedingCategory: knownNeedingCategory.length,
     },
     "drive folder ingest: diffed",
@@ -817,12 +865,20 @@ export async function ingestFromDriveFolder(
     }
   }
 
-  // 3. Rename sync — pure display update; runs against the rows we just
-  //    diffed, so it's bounded by the folder scan and won't hit unrelated
-  //    submissions.
+  // 3. Metadata refresh — mirror Drive-side changes to fileName, mimeType,
+  //    sizeBytes into the VideoFile row. Bounded by this folder's scan so
+  //    unrelated submissions are untouched. `renamed` keeps its historical
+  //    name in the return shape; it now counts ANY metadata change (pure
+  //    rename, mime correction, replace-in-place), since all three are
+  //    "this row's Drive metadata drifted, we resynced it" from the
+  //    operator's point of view.
   let renamed = 0;
-  if (knownNeedingRename.length > 0) {
-    renamed = await syncFileNames(knownNeedingRename, knownByDriveId, log);
+  if (knownNeedingMetaRefresh.length > 0) {
+    renamed = await syncFileMetadata(
+      knownNeedingMetaRefresh,
+      knownByDriveId,
+      log,
+    );
   }
 
   // 4. Category sync — keep Submission.category aligned with each file's
