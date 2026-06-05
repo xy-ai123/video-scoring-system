@@ -38,4 +38,4 @@ EXPOSE 3000
 # overhead on a clean container start is ~1-2s.
 # If migrations fail, the container exits without starting next, which is the
 # right behavior — a broken schema should fail loud, not serve stale data.
-CMD ["sh", "-c", "pnpm -F @vss/db prisma migrate deploy && pnpm -F web start -p 3000"]
+CMD ["sh", "-c", "pnpm -F @vss/db db:deploy && pnpm -F web start -p 3000"]
