@@ -14,6 +14,7 @@ import {
   CalendarRange,
   CheckCircle2,
   CheckSquare,
+  ChevronDown,
   ChevronRight,
   Clock,
   Loader2,
@@ -155,6 +156,14 @@ export function SubmissionsTable({
   // any other string = match only rows whose `main` equals it. "Other"
   // catches rows with null main (form submissions, unresolvable mains).
   const [mainFilter, setMainFilter] = useState<string>("ALL");
+  // Custom-dropdown open state for the Main filter "select". We do NOT
+  // use a native <select> because Safari's OS-level menu would freeze
+  // open whenever another chip click (e.g. Unclipped) triggered a
+  // parent re-render — the OS menu detaches from the React DOM node
+  // and stops responding. A button + DOM-rendered <ul> menu is fully
+  // under React's control and immune to that bug.
+  const [mainMenuOpen, setMainMenuOpen] = useState(false);
+  const mainMenuRef = useRef<HTMLDivElement>(null);
 
   // Set of main section labels (e.g. "Hotel 77", "Other") the user has
   // EXPANDED. Default is collapsed — empty set means every section is
@@ -477,6 +486,28 @@ export function SubmissionsTable({
     const t = setTimeout(() => setBulkMessage(null), 5000);
     return () => clearTimeout(t);
   }, [bulkMessage]);
+
+  // Close the Main-filter dropdown on (a) click outside its container or
+  // (b) Escape key press. Standard dropdown UX. Listeners only attach
+  // while the menu is open so they cost nothing in the common case.
+  useEffect(() => {
+    if (!mainMenuOpen) return;
+    function onPointerDown(e: MouseEvent) {
+      const node = mainMenuRef.current;
+      if (node && !node.contains(e.target as Node)) {
+        setMainMenuOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setMainMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mainMenuOpen]);
 
   async function submitBulkPic() {
     setBulkError(null);
@@ -878,36 +909,67 @@ export function SubmissionsTable({
                   bound to the same `mainFilter` state — picking from
                   the dropdown updates the chips and vice versa. Useful
                   once you have 5+ mains (chips start wrapping); chips
-                  stay for fast one-click toggling. */}
-              <label
-                htmlFor="vss-main-select"
-                className="ml-1 sr-only"
-              >
-                Filter by main folder
-              </label>
-              <select
-                id="vss-main-select"
-                value={mainFilter}
-                onChange={(e) => setMainFilter(e.target.value)}
-                title="Filter by top-level Drive folder (matches the chips on the left)"
-                className={
-                  "rounded-full border px-2.5 py-1 text-xs font-medium " +
-                  (mainFilter === "ALL"
-                    ? "border-slate-200 bg-white text-slate-600"
-                    : "border-indigo-500 bg-indigo-50 text-indigo-700")
-                }
-              >
-                {/* Children come from a memoized array — no inline
-                    conditionals inside <select>. Fixes a Safari quirk
-                    where the native menu would freeze open if the option
-                    list mutated while it was visible (which happened on
-                    every chip click before this change). */}
-                {mainSelectOptions.map((o) => (
-                  <option key={`opt-${o.value}`} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
+                  stay for fast one-click toggling.
+
+                  Implementation: button + DOM <ul> (NOT a native <select>).
+                  See the mainMenuOpen state declaration for why — Safari's
+                  OS-level menu would freeze whenever another chip
+                  triggered a parent re-render. This custom version
+                  is fully React-controlled so re-renders can never
+                  detach an open menu. */}
+              <div ref={mainMenuRef} className="relative ml-1">
+                <button
+                  type="button"
+                  onClick={() => setMainMenuOpen((v) => !v)}
+                  aria-haspopup="listbox"
+                  aria-expanded={mainMenuOpen}
+                  aria-label="Filter by main folder"
+                  title="Filter by top-level Drive folder (matches the chips on the left)"
+                  className={
+                    "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium " +
+                    (mainFilter === "ALL"
+                      ? "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                      : "border-indigo-500 bg-indigo-50 text-indigo-700 hover:bg-indigo-100")
+                  }
+                >
+                  {mainSelectOptions.find((o) => o.value === mainFilter)
+                    ?.label ?? "All mains"}
+                  <ChevronDown
+                    className={
+                      "h-3 w-3 transition-transform " +
+                      (mainMenuOpen ? "rotate-180" : "")
+                    }
+                  />
+                </button>
+                {mainMenuOpen ? (
+                  <ul
+                    role="listbox"
+                    className="absolute left-0 top-full z-30 mt-1 min-w-[140px] overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-xs shadow-lg"
+                  >
+                    {mainSelectOptions.map((o) => (
+                      <li key={`opt-${o.value}`}>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={mainFilter === o.value}
+                          onClick={() => {
+                            setMainFilter(o.value);
+                            setMainMenuOpen(false);
+                          }}
+                          className={
+                            "block w-full px-3 py-1.5 text-left hover:bg-slate-50 " +
+                            (mainFilter === o.value
+                              ? "bg-indigo-50 font-medium text-indigo-700"
+                              : "text-slate-700")
+                          }
+                        >
+                          {o.label}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
             </>
           ) : null}
         </div>
