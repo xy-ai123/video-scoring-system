@@ -1,0 +1,201 @@
+// Video Scoring System — shared Prisma schema.
+// Generated client is consumed by both apps/web and apps/worker.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubmissionStatus {
+  PENDING
+  SCORING
+  SCORED
+  APPROVED
+  REJECTED
+  FAILED
+}
+
+enum ScoringStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+model Submission {
+  id             String           @id @default(cuid())
+  responseId     String           @unique
+  submitterEmail String
+  submitterName  String
+  // Optional phone number the submitter filled in on the Google Form
+  // ("Phone Provided" field). Nullable for legacy rows + form variants that
+  // don't ask for it.
+  phoneProvided  String?
+  category       String
+  // Original Drive parent-folder name for ingested-from-Drive submissions
+  // (e.g. "15 May", "VPM1060"). Recorded at ingest time and never edited
+  // by the operator — distinct from `category`, which is user-controlled
+  // and starts blank for Drive-ingested rows. The dashboard's Phone
+  // Provided cell uses this as the link label so operators can still see
+  // which Drive folder a video came from even after they've manually
+  // categorised it. Null for form-submitted rows.
+  driveFolderName String?
+  status         SubmissionStatus @default(PENDING)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  reviewedAt     DateTime?
+  reviewedBy     String?
+  // Free-text name typed by the admin in the approve/reject dialog.
+  // Distinct from `reviewedBy` (which is the auth email of the logged-in
+  // admin). Shown on the submission detail page as "Person in Charge".
+  personInCharge String?
+  // Free-text reason typed by the admin in the reject dialog. Only set when
+  // the submission is rejected; cleared if an admin later flips it back to
+  // approved (we don't want a stale reason hanging around on an approved
+  // row). Distinct from `notes` (admin-only private memo) — `rejectReason`
+  // shows on the public-facing dashboard column.
+  rejectReason   String?
+  notes          String?
+  // Soft-delete support: a submission is "trashed" when deletedAt is set.
+  // Restoration nulls these fields back out. The AuditLog has a complete
+  // who/when history independent of these.
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  files  VideoFile[]
+  scores Score[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+model VideoFile {
+  id             String        @id @default(cuid())
+  submissionId   String
+  submission     Submission    @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  driveFileId    String
+  fileName       String
+  mimeType       String?
+  sizeBytes      BigInt?
+  // Duration of the video in seconds. Nullable because legacy rows pre-date
+  // this column and because Drive may not always return videoMediaMetadata
+  // (e.g. unprocessed files immediately after upload).
+  durationSec    Float?
+  scoringStatus  ScoringStatus @default(PENDING)
+  scoringError   String?
+  processedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  scores Score[]
+
+  @@index([submissionId])
+  @@index([scoringStatus])
+}
+
+model Score {
+  id           String     @id @default(cuid())
+  submissionId String
+  fileId       String?
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  file         VideoFile? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  metric       String
+  value        Float
+  raw          Json?
+  createdAt    DateTime   @default(now())
+
+  @@index([submissionId])
+  @@index([fileId])
+}
+
+// Phone inventory. Each row represents one head-mounted-capture phone the
+// project loans out. The `internal` code (e.g. "VPM0157") is what shows up
+// as the dropdown option on the Google Form's "Phone Provided" question,
+// and what gets persisted on Submission.phoneProvided — so we can join the
+// two by string equality in the admin UI.
+model Phone {
+  internal     String   @id // operator-assigned, e.g. "VPM0157"
+  modelNumber  String
+  phoneSerial  String?
+  imei         String?
+  imei2        String?
+  rentedOut    Boolean  @default(false)
+  // Date the phone was rented out (operator-set). Nullable so we can
+  // distinguish "never rented" from "rented on 2026-05-20", and so the
+  // filter on the inventory page can do date-range queries against it.
+  rentedAt     DateTime?
+  // Free-text name of the person this phone is currently loaned to. Kept
+  // separate from any submission-level PIC field so the inventory page
+  // tracks the *physical* assignee independent of who reviewed which video.
+  assignedUser String?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actor     String
+  action    String
+  target    String
+  payload   Json?
+  createdAt DateTime @default(now())
+
+  @@index([target])
+  @@index([createdAt])
+}
+
+// Admin user with a bcrypt-hashed password. Replaces the env-var-based
+// ADMIN_USERNAME / ADMIN_PASSWORD pair so the admin can change their own
+// credentials from the dashboard without a redeploy.
+//
+// Why a separate table (instead of reusing AuditLog or stuffing into env):
+//   - bcrypt verification belongs next to the row, not in env
+//   - admins should be able to change their username AND password from
+//     the UI; env-based creds need a server restart to update
+//   - seedAdminUser() (apps/web/src/lib/adminUser.ts) ensures exactly one
+//     admin exists on first boot, defaulting to admin / admin123 — the
+//     dashboard UI then nudges the operator to change it
+//
+// Guest sessions don't have a row here; they're identified purely by the
+// role field in the signed cookie.
+model AdminUser {
+  id           String   @id @default(cuid())
+  // Stored lowercased; the login form lowercases user input before
+  // comparing so the username compare is case-insensitive without
+  // pulling in a citext column type.
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// Per-main read-only guest accounts. Each row scopes a login to a
+// single Drive-resolved "main" folder ("Hotel 77", "VNM", …) — the
+// dashboard, the search results, and the submission-detail page all
+// filter to that main when the session's role is "guest".
+//
+// Schema mirrors AdminUser (username + bcrypt hash) plus `allowedMain`.
+// Admins create / edit / delete these rows from /admin/guests; guests
+// can't reach that page.
+//
+// `allowedMain` is a free-text string that must match one of the
+// values returned by getDriveMains().knownMains (case-sensitive
+// equality — Drive folder names are user-facing labels and we don't
+// want to silently mismatch "Hotel 77" vs "hotel 77"). If a guest's
+// allowedMain doesn't currently exist in the Drive walk's known
+// mains, the dashboard will simply show no submissions for them —
+// that's the right answer, not an error.
+model GuestUser {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  allowedMain  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

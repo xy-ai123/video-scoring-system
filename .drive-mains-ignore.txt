@@ -1,0 +1,22 @@
+# Drive folders that should NEVER be treated as a top-level "main"
+# project in the Submissions dashboard.
+#
+# Format:
+#   - one folder NAME per line (case-sensitive, exact match)
+#   - blank lines and lines starting with `#` are ignored
+#
+# Used by apps/worker/src/scripts/dumpDriveMains.ts. Folders matched
+# here are skipped when computing main candidates — any video file
+# whose Drive ancestry passes through (or starts at) one of these
+# folders resolves to a NULL main and shows up under the "Other"
+# bucket on /admin instead of producing its own chip/column value.
+#
+# Typical entries: staging / inbox / hand-off folders that aren't
+# real projects.
+
+# Local pipeline's Drive-side incoming bucket — raw videos land here
+# before being moved into a real project folder (Hotel 77/, VNM/, …).
+# Without this entry, the 9-or-so files sitting in this folder at any
+# given moment generate a misleading "robot-video-pipeline-incoming"
+# main chip on the dashboard.
+robot-video-pipeline-incoming

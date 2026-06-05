@@ -1,0 +1,176 @@
+/**
+ * Sync the dashboard with everything currently shared with the worker's
+ * service account: raw video files (via the regular driveFolderIngest) and
+ * videos packaged inside ZIP archives (via zipIngest).
+ *
+ * Designed to be safe to run repeatedly — both ingest paths are idempotent.
+ *
+ *   # one-shot
+ *   pnpm exec tsx src/scripts/syncFromSharedDrive.ts
+ *
+ *   # poll forever (default interval = 60s)
+ *   pnpm exec tsx src/scripts/syncFromSharedDrive.ts --watch
+ *   pnpm exec tsx src/scripts/syncFromSharedDrive.ts --watch --interval=120
+ *
+ * Doesn't touch the existing watcher or change any other ingest behavior;
+ * this is purely additive. The original ingestDriveFolder watcher (which
+ * only picks up raw video files in the form-responses folder) keeps running
+ * unchanged — this script adds coverage for every shared folder plus ZIPs.
+ */
+import { config as loadDotenv } from "dotenv";
+loadDotenv();
+loadDotenv({ path: "../../.env", override: false });
+
+import { prisma } from "@vss/db";
+import { getDriveClient } from "../services/drive.js";
+import {
+  ingestFromDriveFolder,
+  softDeleteMissingDriveSubmissions,
+} from "../services/driveFolderIngest.js";
+import { ingestZipsFromSharedDrives } from "../services/zipIngest.js";
+import { scoringQueue } from "../lib/queue.js";
+import { logger } from "../lib/logger.js";
+
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+
+async function listAllSharedFolders(): Promise<{ id: string; name: string }[]> {
+  const drive = getDriveClient();
+  const out: { id: string; name: string }[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await drive.files.list({
+      q: `mimeType = '${FOLDER_MIME}' and trashed = false`,
+      pageSize: 1000,
+      fields: "nextPageToken, files(id, name)",
+      pageToken,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: "allDrives",
+    });
+    for (const f of res.data.files ?? []) {
+      if (f.id && f.name) out.push({ id: f.id, name: f.name });
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return out;
+}
+
+function parseArgs(argv: string[]): { watch: boolean; intervalSec: number } {
+  let watch = false;
+  let intervalSec = 60;
+  for (const a of argv) {
+    if (a === "--watch") watch = true;
+    const m = a.match(/^--interval=(\d+)$/);
+    if (m && m[1]) {
+      intervalSec = Math.max(15, Math.min(3600, Number(m[1])));
+    }
+  }
+  return { watch, intervalSec };
+}
+
+async function runOnce() {
+  // 1. Raw video files — uses the existing battle-tested ingester per folder.
+  const folders = await listAllSharedFolders();
+  logger.info({ count: folders.length }, "syncFromSharedDrive: folders");
+
+  const rawTotals = {
+    foldersWalked: 0,
+    scanned: 0,
+    ingested: 0,
+    durationsBackfilled: 0,
+    softDeleted: 0,
+    errors: 0,
+  };
+  // Aggregate every drive file ID seen across the whole sweep so the
+  // soft-delete pass at the end has the *complete* "what's currently in
+  // Drive" set. Soft-deleting per folder would incorrectly trash files
+  // that live in another folder we just haven't scanned yet (the bug
+  // that wiped 9 newly-uploaded VPM0166/VPM0167 videos before this fix).
+  const unionDriveFileIds = new Set<string>();
+  for (const folder of folders) {
+    try {
+      const s = await ingestFromDriveFolder(folder.id, {
+        skipSoftDelete: true,
+      });
+      rawTotals.foldersWalked += 1;
+      rawTotals.scanned += s.scanned;
+      rawTotals.ingested += s.ingested;
+      rawTotals.durationsBackfilled += s.durationsBackfilled;
+      rawTotals.errors += s.errors;
+      for (const id of s.driveFileIds) unionDriveFileIds.add(id);
+    } catch (err) {
+      rawTotals.errors += 1;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { folder: folder.name, folderId: folder.id, errMessage: message },
+        "syncFromSharedDrive: raw ingest error",
+      );
+    }
+  }
+  // One aggregated soft-delete pass using the union of *all* shared
+  // folders' current contents. Now a video that exists in folder B is
+  // safe from being soft-deleted by the loop's pass over folder A.
+  try {
+    rawTotals.softDeleted = await softDeleteMissingDriveSubmissions(
+      unionDriveFileIds,
+      logger,
+    );
+  } catch (err) {
+    rawTotals.errors += 1;
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { errMessage: message },
+      "syncFromSharedDrive: aggregated soft-delete failed",
+    );
+  }
+  logger.info(rawTotals, "syncFromSharedDrive: raw videos done");
+
+  // 2. ZIP archives — extracts video entries and creates one Submission per
+  //    extracted video.
+  const zipSummary = await ingestZipsFromSharedDrives();
+  logger.info(zipSummary, "syncFromSharedDrive: zip ingest done");
+
+  return { rawTotals, zipSummary };
+}
+
+async function main() {
+  const { watch, intervalSec } = parseArgs(process.argv.slice(2));
+  logger.info({ watch, intervalSec }, "syncFromSharedDrive: starting");
+
+  if (!watch) {
+    const result = await runOnce();
+    await scoringQueue().close();
+    await prisma.$disconnect();
+    logger.info(result, "syncFromSharedDrive: complete");
+    return;
+  }
+
+  // Watch mode: keep polling forever. Per-tick failures get logged and
+  // don't crash the loop, so a transient Drive 503 doesn't break ingestion.
+  let stopping = false;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      logger.info({ sig }, "syncFromSharedDrive: shutting down");
+      stopping = true;
+    });
+  }
+  while (!stopping) {
+    try {
+      const result = await runOnce();
+      logger.info(result, "syncFromSharedDrive: tick complete");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ errMessage: message }, "syncFromSharedDrive: tick failed");
+    }
+    if (stopping) break;
+    await new Promise((r) => setTimeout(r, intervalSec * 1000));
+  }
+  await scoringQueue().close();
+  await prisma.$disconnect();
+}
+
+main().catch(async (err) => {
+  logger.error({ err }, "syncFromSharedDrive: fatal");
+  await prisma.$disconnect().catch(() => {});
+  process.exit(1);
+});

@@ -1,0 +1,27 @@
+{
+  "name": "video-scoring-system",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev:web": "pnpm -F web dev",
+    "dev:web-algo": "pnpm -F web-algo dev",
+    "dev:worker": "pnpm -F worker dev",
+    "build": "pnpm -F @vss/db build && pnpm -F web build && pnpm -F web-algo build && pnpm -F worker build",
+    "db:generate": "pnpm -F @vss/db db:generate",
+    "db:migrate": "pnpm -F @vss/db db:migrate",
+    "db:deploy": "pnpm -F @vss/db db:deploy",
+    "db:studio": "pnpm -F @vss/db db:studio",
+    "lint": "pnpm -r --parallel lint",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test:webhook": "pnpm -F web exec tsx ../../scripts/test-webhook.ts"
+  },
+  "devDependencies": {
+    "localtunnel": "^2.0.2",
+    "prisma": "^5.18.0",
+    "typescript": "^5.5.4"
+  }
+}
