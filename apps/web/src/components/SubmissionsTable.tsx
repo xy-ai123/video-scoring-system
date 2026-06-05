@@ -395,6 +395,51 @@ export function SubmissionsTable({
     })) satisfies Group[];
   }, [filtered, mainFilter]);
 
+  // Are any narrowing filters active? Used to gate auto-expand of group
+  // headers — see the effect below. Computed at the top level (not inside
+  // the table render) so the dependent useEffect can subscribe to it.
+  const filtersActive =
+    searchQuery.trim().length > 0 ||
+    filter !== "ALL" ||
+    clipFilter !== "ALL" ||
+    dateFrom.length > 0 ||
+    dateTo.length > 0;
+
+  // Auto-expand all groups when filters become active. Two trigger cases:
+  //   1. First mount with filters already active (e.g. deep-link with
+  //      ?phoneProvided=… — operator clicks an inventory link and lands
+  //      here expecting to see matching rows, not collapsed sections).
+  //   2. User toggles filters from off → on (clicks Unclipped, types a
+  //      query, picks a status chip, sets a date range).
+  // Critically, the effect ONLY fires on the off→on transition (and
+  // first mount when on). It does NOT re-fire while filters stay active
+  // — so after this auto-expand, the user can manually collapse any
+  // group via the chevron and we'll respect it. Previously the
+  // expansion check OR'd in `filtersActive` directly, which made the
+  // chevron a no-op whenever any filter was active.
+  const prevFiltersActiveRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    // Wait until expandedMains has loaded from localStorage so this
+    // effect doesn't race the hydration effect.
+    if (!hasHydratedExpanded.current) return;
+    const wasActive = prevFiltersActiveRef.current;
+    prevFiltersActiveRef.current = filtersActive;
+    const shouldAutoExpand =
+      filtersActive && (wasActive === null || wasActive === false);
+    if (!shouldAutoExpand) return;
+    setExpandedMains((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const g of groupedByMain) {
+        if (!next.has(g.label)) {
+          next.add(g.label);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [filtersActive, groupedByMain]);
+
   // Precomputed option list for the Main filter <select>. Stable across
   // re-renders driven by other filter chips (status/clip/search) because
   // it depends only on `knownMains` (a prop) and `hasNullMainRows` (a
@@ -1375,22 +1420,18 @@ export function SubmissionsTable({
                     // filter, in which case "collapse" wouldn't make
                     // sense — show everything).
                     //
-                    // Override: if ANY other filter is narrowing the
-                    // list (search query, status chip, clip chip, date
-                    // range), force every group expanded. Otherwise
-                    // operators type a query and see "0 results" even
-                    // when matches exist — they're just hidden behind
-                    // a collapsed section.
-                    const filtersActive =
-                      searchQuery.trim().length > 0 ||
-                      filter !== "ALL" ||
-                      clipFilter !== "ALL" ||
-                      dateFrom.length > 0 ||
-                      dateTo.length > 0;
+                    // No `filtersActive ||` override here on purpose —
+                    // see the auto-expand useEffect at the top of the
+                    // component. That effect adds every group to
+                    // `expandedMains` exactly once when filters
+                    // transition off→on (preserves the deep-link UX so
+                    // operators don't see "0 results" behind a
+                    // collapsed section). After that, the chevron
+                    // toggles `expandedMains` directly, so the user can
+                    // collapse any group manually even while filters
+                    // are active.
                     const isExpanded =
-                      !showHeader ||
-                      filtersActive ||
-                      expandedMains.has(group.label);
+                      !showHeader || expandedMains.has(group.label);
                     const headerRow = showHeader ? (
                       <tr
                         key={`main-hdr-${group.label}`}
