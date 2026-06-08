@@ -42,6 +42,12 @@ export type Row = {
    *  duplicates inside the submission deduped. Null when no file in the
    *  submission has a measured duration. */
   durationSec: number | null;
+  /** True when EVERY file in this submission is unmeasurable —
+   *  durationSec=0 (junk reading) OR null after the corrupt-attempt
+   *  threshold. Set server-side in /admin/page.tsx so this client
+   *  component doesn't have to re-do the predicate. When true the
+   *  duration cell renders a red CORRUPT badge instead of "—". */
+  corrupt: boolean;
   /** Person in Charge — typed by an admin via the approve/reject dialog or
    *  the standalone "Edit PIC" button. Null until someone fills it in. */
   personInCharge: string | null;
@@ -1368,7 +1374,22 @@ export function SubmissionsTable({
                         {r.fileCount} {r.fileCount === 1 ? "file" : "files"}
                       </span>
                       <span>·</span>
-                      <span>{formatDurationSec(r.durationSec)}</span>
+                      {/* CORRUPT takes priority over the numeric duration
+                          — even if one file in the submission has a real
+                          measurement, the overall row is flagged only when
+                          EVERY file is unmeasurable (see /admin/page.tsx's
+                          corrupt predicate), so this branch only fires
+                          when there's truly nothing to show. */}
+                      {r.corrupt ? (
+                        <span
+                          className="rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-700"
+                          title="Couldn't measure this video's duration after multiple attempts — likely corrupt"
+                        >
+                          Corrupt
+                        </span>
+                      ) : (
+                        <span>{formatDurationSec(r.durationSec)}</span>
+                      )}
                       <span>·</span>
                       <span>
                         PIC:{" "}
@@ -1630,7 +1651,16 @@ export function SubmissionsTable({
                       </td>
                       <td className="px-3 py-2 text-slate-700">{r.fileCount}</td>
                       <td className="px-3 py-2 text-slate-700 tabular-nums">
-                        {formatDurationSec(r.durationSec)}
+                        {r.corrupt ? (
+                          <span
+                            className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-700"
+                            title="Couldn't measure this video's duration after multiple attempts — likely corrupt"
+                          >
+                            Corrupt
+                          </span>
+                        ) : (
+                          formatDurationSec(r.durationSec)
+                        )}
                       </td>
                       <td className="px-3 py-2">
                         <StatusBadge status={r.status} />

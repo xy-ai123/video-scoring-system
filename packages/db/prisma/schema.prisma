@@ -86,6 +86,16 @@ model VideoFile {
   // this column and because Drive may not always return videoMediaMetadata
   // (e.g. unprocessed files immediately after upload).
   durationSec    Float?
+  // Number of times Phase-2 ffprobe backfill has attempted to measure this
+  // file's duration and either got null OR got 0. Reset to 0 on a
+  // successful measurement (durationSec > 0). The dashboard uses this to
+  // mark a row as CORRUPT once it crosses a small threshold (3) — by then
+  // every probe path (Drive metadata, HEAD range, tail range, ffprobe)
+  // has had multiple chances and still couldn't extract a duration, so
+  // the file is almost certainly broken. Lets corrupt detection work on
+  // Railway, where the local `.duration-ffprobe-attempts.json` file used
+  // by the older detection scheme doesn't exist.
+  durationProbeAttempts Int    @default(0)
   scoringStatus  ScoringStatus @default(PENDING)
   scoringError   String?
   processedAt    DateTime?

@@ -316,26 +316,67 @@ async function fillDurationFor(
   fileName: string,
   log = logger,
 ): Promise<boolean> {
+  // Probe outcomes:
+  //   - durationSec > 0           — real value; store + reset attempt counter.
+  //   - durationSec === 0         — measured-but-empty; store 0 + bump attempts.
+  //                                 (the dashboard treats 0 as immediately corrupt;
+  //                                 we keep bumping so a later Sync that finally
+  //                                 gets a real value resets the counter cleanly.)
+  //   - durationSec === null      — couldn't measure at all; leave durationSec
+  //                                 alone + bump attempts.
+  //   - exception thrown          — same as null: bump attempts, leave durationSec.
   try {
     const { durationSec, source } =
       await measureDriveVideoDuration(driveFileId);
+
     if (durationSec == null) {
+      await prisma.videoFile.update({
+        where: { id: videoFileId },
+        data: { durationProbeAttempts: { increment: 1 } },
+      });
       log.warn(
         { videoFileId, driveFileId, fileName },
         "drive ingest: could not measure duration (metadata + head + tail all empty)",
       );
       return false;
     }
+
+    if (durationSec > 0) {
+      await prisma.videoFile.update({
+        where: { id: videoFileId },
+        data: { durationSec, durationProbeAttempts: 0 },
+      });
+      log.info(
+        { videoFileId, driveFileId, fileName, durationSec, source },
+        "drive ingest: durationSec measured",
+      );
+      return true;
+    }
+
+    // durationSec === 0 (or negative — defensive). Treat as failed probe:
+    // store the 0 so the UI's "render — for value <= 0" rule kicks in AND
+    // bump the counter so threshold-based CORRUPT detection ticks toward
+    // its limit.
     await prisma.videoFile.update({
       where: { id: videoFileId },
-      data: { durationSec },
+      data: { durationSec, durationProbeAttempts: { increment: 1 } },
     });
-    log.info(
-      { videoFileId, driveFileId, fileName, durationSec, source },
-      "drive ingest: durationSec measured",
+    log.warn(
+      { videoFileId, driveFileId, fileName, source },
+      "drive ingest: duration measured as 0 — junk reading, will retry next sync",
     );
-    return true;
+    return false;
   } catch (err) {
+    // Best-effort bump even on throw. If the bump itself fails (DB error),
+    // just log; the next sync will try again from the unchanged counter.
+    try {
+      await prisma.videoFile.update({
+        where: { id: videoFileId },
+        data: { durationProbeAttempts: { increment: 1 } },
+      });
+    } catch {
+      // ignore
+    }
     log.error(
       {
         videoFileId,

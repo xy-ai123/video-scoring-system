@@ -60,6 +60,9 @@ export default async function AdminHomePage({
           select: {
             driveFileId: true,
             durationSec: true,
+            // Failed-probe counter — see schema.prisma. Combined with
+            // durationSec below to compute the row's `corrupt` flag.
+            durationProbeAttempts: true,
             fileName: true,
             createdAt: true,
           },
@@ -175,6 +178,10 @@ export default async function AdminHomePage({
     return null;
   }
 
+  // Threshold for "we've conclusively given up measuring this file" —
+  // see schema.prisma's VideoFile.durationProbeAttempts doc. After this
+  // many failed probes the file is treated as corrupt for UI + delete.
+  const CORRUPT_PROBE_THRESHOLD = 3;
   const allRows: Row[] = submissions.map((s) => {
     const { totalSec, anyMeasured } = submissionDuration(s.files);
     // Files are ordered DESC by createdAt above, so [0] is the latest. We
@@ -184,6 +191,26 @@ export default async function AdminHomePage({
     // ANY-file rule: submission counts as clipped if at least one of its
     // VideoFile rows has a matching "<stem> (clipped).mp4" on disk.
     const isClipped = s.files.some((f) => HAS_CLIPPED_SUFFIX.test(f.fileName));
+    // A submission is "corrupt" when EVERY file is unmeasurable. Two
+    // ways a file qualifies as unmeasurable:
+    //   1. durationSec === 0 — probe got a junk-zero reading (Drive
+    //      metadata had 0, ffprobe head/tail returned 0). Immediate
+    //      flag because real 0-second videos are implausible.
+    //   2. durationSec is null AND we've tried ≥ CORRUPT_PROBE_THRESHOLD
+    //      times — the probe just won't extract a duration. After enough
+    //      attempts, treat the file as broken.
+    // Empty files array → not corrupt (the row has no file yet; e.g.
+    // form submissions that haven't pulled into Drive). All-files match
+    // = corrupt. Either-file match = NOT corrupt (the other file might
+    // be the live evidence and we can still score off it).
+    const corrupt =
+      s.files.length > 0 &&
+      s.files.every(
+        (f) =>
+          f.durationSec === 0 ||
+          (f.durationSec == null &&
+            f.durationProbeAttempts >= CORRUPT_PROBE_THRESHOLD),
+      );
     return {
       id: s.id,
       responseId: s.responseId,
@@ -194,6 +221,7 @@ export default async function AdminHomePage({
       createdAt: s.createdAt.toISOString(),
       fileCount: s._count.files,
       durationSec: anyMeasured ? totalSec : null,
+      corrupt,
       personInCharge: s.personInCharge,
       phoneProvided: s.phoneProvided,
       rejectReason: s.rejectReason,

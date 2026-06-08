@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+// Plain (no `node:` prefix) — see driveSync.ts for why.
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { prisma } from "@vss/db";
 import { getCurrentAdmin } from "@/lib/auth";
 
@@ -58,17 +59,25 @@ type CorruptRow = {
   driveFileIds: string[];
 };
 
+/** Mirrors the threshold used in /admin/page.tsx to compute the
+ *  row-level `corrupt` flag. Bumped only if you also bump it there. */
+const CORRUPT_PROBE_THRESHOLD = 3;
+
 async function findCorruptSubmissions(): Promise<CorruptRow[]> {
+  // Pull every live submission with its files. A submission qualifies
+  // as corrupt when EVERY file is unmeasurable. Two independent signals
+  // count a file as unmeasurable:
+  //   A. The new (Railway-compatible) DB-only path:
+  //        durationSec === 0  OR  durationSec IS NULL with
+  //        durationProbeAttempts >= CORRUPT_PROBE_THRESHOLD.
+  //   B. The legacy local path: durationSec IS NULL AND the file's
+  //        driveFileId appears in the worker's
+  //        .duration-ffprobe-attempts.json (set the FIRST time we tried
+  //        ffprobe on it). Only useful when the dashboard is running on
+  //        a developer's Mac next to the local worker.
+  // Either signal is enough — the operator's UI badge uses the DB path,
+  // the legacy path is kept for back-compat with old local dev setups.
   const attempted = loadFfprobeAttempts();
-  if (attempted.size === 0) {
-    // No probe history → there's nothing we've conclusively given up
-    // on. Skip the DB query entirely.
-    return [];
-  }
-  // Pull every live submission with its files. We need EVERY file's
-  // durationSec to be null AND every driveFileId in the attempt map,
-  // which is two independent ANDs — easier to filter in code than
-  // in Prisma's relation filters.
   const subs = await prisma.submission.findMany({
     where: { deletedAt: null },
     select: {
@@ -76,17 +85,30 @@ async function findCorruptSubmissions(): Promise<CorruptRow[]> {
       submitterEmail: true,
       submitterName: true,
       files: {
-        select: { driveFileId: true, durationSec: true, fileName: true },
+        select: {
+          driveFileId: true,
+          durationSec: true,
+          durationProbeAttempts: true,
+          fileName: true,
+        },
       },
     },
   });
   const out: CorruptRow[] = [];
   for (const s of subs) {
     if (s.files.length === 0) continue; // no files → not "corrupt"
-    const allNull = s.files.every((f) => f.durationSec == null);
-    if (!allNull) continue;
-    const allAttempted = s.files.every((f) => attempted.has(f.driveFileId));
-    if (!allAttempted) continue;
+    const allCorrupt = s.files.every((f) => {
+      if (f.durationSec === 0) return true;
+      if (f.durationSec == null) {
+        if (f.durationProbeAttempts >= CORRUPT_PROBE_THRESHOLD) return true;
+        // Legacy local-Mac fallback: if the worker's local attempts
+        // file has this driveFileId, we tried at least once. Combined
+        // with the null durationSec, that's "we gave up on the Mac".
+        if (attempted.size > 0 && attempted.has(f.driveFileId)) return true;
+      }
+      return false;
+    });
+    if (!allCorrupt) continue;
     out.push({
       id: s.id,
       submitterEmail: s.submitterEmail,
@@ -136,7 +158,10 @@ export async function POST() {
             action: "submission.delete.corrupt",
             target: row.id,
             payload: {
-              reason: "every file's durationSec is null AND ffprobe attempt recorded",
+              reason:
+                "every file is unmeasurable (durationSec=0, or null with probeAttempts>=" +
+                CORRUPT_PROBE_THRESHOLD +
+                ", or legacy local attempt-file match)",
               fileNames: row.fileNames,
               driveFileIds: row.driveFileIds,
             },
