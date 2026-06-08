@@ -1705,6 +1705,7 @@ export function SubmissionsTable({
                           submissionId={r.id}
                           value={r.category}
                           history={categoryHistory}
+                          readOnly={readOnly}
                         />
                       </td>
                       <td className="px-3 py-2 text-slate-700">{r.fileCount}</td>
@@ -2292,10 +2293,18 @@ function CategoryCell({
   submissionId,
   value,
   history,
+  readOnly = false,
 }: {
   submissionId: string;
   value: string;
   history: string[];
+  /** When true, render the value as plain text — no edit button, no
+   *  popover, no click handler. Used in guest mode so guests can SEE
+   *  the operator-set category but can't change it. Admin behaviour is
+   *  unchanged (default false). The category API endpoint already
+   *  rejects guest sessions server-side; this is the matching UI gate
+   *  so guests don't even see the affordance. */
+  readOnly?: boolean;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -2303,6 +2312,21 @@ function CategoryCell({
   const [draft, setDraft] = useState(value);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Read-only fast path. Empty value renders as a dim em-dash so a row
+  // with no category doesn't look like a broken cell. The button-shaped
+  // affordance is intentionally NOT used here — guests should see this
+  // is data, not a control they can interact with.
+  if (readOnly) {
+    const v = value.trim();
+    return v.length === 0 ? (
+      <span className="text-slate-300">—</span>
+    ) : (
+      <span className="block max-w-[14rem] truncate text-slate-700" title={v}>
+        {v}
+      </span>
+    );
+  }
 
   // Reset the local draft whenever the parent value flips — happens after
   // a successful save + router.refresh() rebuilds the table.
