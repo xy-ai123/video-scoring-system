@@ -955,9 +955,18 @@ export async function ingestFromDriveFolder(
     ]),
   );
   const fresh = files.filter((f) => !knownByDriveId.has(f.id));
+  // Match the UI: durationSec of 0 is treated as "not yet measured"
+  // (formatDurationSec renders `—` for both null and 0). A real 0-second
+  // video is implausible — operators upload trimmed clips ≥1s. So if
+  // we ever stored 0 it was a junk measurement (Drive metadata not
+  // ready, ffprobe HEAD probe returning 0, etc.) and the row should
+  // get another shot on the next Phase 2 pass. Otherwise the row
+  // would be visually "—" forever but the backfill loop would never
+  // pick it up again.
   const knownNeedingDuration = files.filter((f) => {
     const r = knownByDriveId.get(f.id);
-    return r != null && r.durationSec == null;
+    if (!r) return false;
+    return r.durationSec == null || r.durationSec === 0;
   });
   // Metadata-refresh diff: pick up Drive-side changes to fileName, mimeType,
   // OR sizeBytes. Renaming a file in Drive is the common case; replace-in-
