@@ -13,10 +13,13 @@
  * without the Python project will fail at runtime.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import path from "node:path";
-import fs from "node:fs";
-import os from "node:os";
+// Plain (no `node:` prefix). See driveSync.ts for context — Next.js's
+// instrumentation hook + Edge fallback pass trips UnhandledSchemeError
+// on `node:` URIs.
+import { spawn, type ChildProcess } from "child_process";
+import path from "path";
+import fs from "fs";
+import os from "os";
 import Database from "better-sqlite3";
 import { prisma } from "@vss/db";
 

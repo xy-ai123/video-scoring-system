@@ -21,9 +21,15 @@
  * is in flight returns `{ started: false, reason: "already_running" }`.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import path from "node:path";
-import fs from "node:fs";
+// Plain (no `node:` prefix) so Next.js's Edge-runtime webpack pass
+// doesn't fail with UnhandledSchemeError when the instrumentation hook
+// indirectly references this module from a build that also targets
+// Edge. Functionally identical in Node — these are core modules. The
+// runtime `register()` is gated on NEXT_RUNTIME === "nodejs" so this
+// file's body never actually executes outside Node.
+import { spawn, type ChildProcess } from "child_process";
+import path from "path";
+import fs from "fs";
 import { invalidateDriveMains } from "./driveMains";
 
 /**
@@ -340,4 +346,20 @@ export function stopAutoSyncTimer(): void {
     clearInterval(autoSyncTimer);
     autoSyncTimer = null;
   }
+}
+
+// Auto-arm the timer the first time this module is loaded. We
+// originally used Next.js's instrumentation hook for this, but the
+// hook compiled this module for the Edge runtime too — which can't
+// handle Node-only imports like child_process. Bottom-of-file arm is
+// simpler and idempotent: the FIRST import of driveSync.ts (which
+// happens when anyone hits /api/admin/sync-drive — i.e. every /admin
+// page load thanks to SyncDriveButton's status fetch) arms the timer.
+// Every subsequent import hits the `if (autoSyncTimer) return` guard
+// inside startAutoSyncTimer so no double-arming.
+//
+// The NEXT_RUNTIME check keeps this from running in the (theoretical)
+// Edge build of this module — same reason instrumentation needed it.
+if (process.env.NEXT_RUNTIME === "nodejs") {
+  startAutoSyncTimer();
 }

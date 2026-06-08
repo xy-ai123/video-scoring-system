@@ -22,11 +22,6 @@ const nextConfig = {
       "pino-pretty",
       "thread-stream",
     ],
-    // Enables the `src/instrumentation.ts` hook on Next.js 14. (Auto-on
-    // in Next 15+, but we're on 14.2.x.) Without this flag the file
-    // would be silently ignored at build time and the Drive auto-sync
-    // timer never fires.
-    instrumentationHook: true,
   },
   poweredByHeader: false,
   async headers() {

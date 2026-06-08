@@ -15,9 +15,14 @@
  * Drive and clips under it bucket as "Other" for up to 5 minutes.
  */
 
-import { spawn } from "node:child_process";
-import path from "node:path";
-import fs from "node:fs";
+// Plain (no `node:` prefix). When Next.js's instrumentation hook
+// triggers a build pass that webpack handles via the Edge fallback,
+// `node:` URIs trip UnhandledSchemeError even though this file only
+// runs in Node. Plain names compile cleanly and are functionally
+// identical at runtime.
+import { spawn } from "child_process";
+import path from "path";
+import fs from "fs";
 
 type MainsPayload = {
   /** Map from immediate-parent folder name → top-level main name. */
