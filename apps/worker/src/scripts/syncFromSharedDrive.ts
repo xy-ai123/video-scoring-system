@@ -176,15 +176,45 @@ async function runOnce() {
   return { rawTotals, zipSummary };
 }
 
+/**
+ * Close transient connections + force the process to exit. The
+ * scoring queue keeps an ioredis connection with a retry timer that
+ * holds the Node event loop open even after queue.close() returns,
+ * which blocks the subprocess from exiting on Railway (no Redis →
+ * connection forever pending). The web app's spawn wrapper marks the
+ * sync as finished only when the subprocess exits, so without this
+ * force-exit the "Syncing Drive…" button gets stuck visible.
+ *
+ * Best-effort close first so any in-flight Redis traffic flushes,
+ * then process.exit so the OS kernel reclaims the socket.
+ */
+async function shutdown(exitCode: number): Promise<never> {
+  try {
+    // Race the queue close against a short deadline so a broken
+    // connection can't keep us hanging.
+    await Promise.race([
+      scoringQueue().close(),
+      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+    ]);
+  } catch {
+    // ignore — we're about to exit anyway
+  }
+  try {
+    await prisma.$disconnect();
+  } catch {
+    // ignore
+  }
+  process.exit(exitCode);
+}
+
 async function main() {
   const { watch, intervalSec } = parseArgs(process.argv.slice(2));
   logger.info({ watch, intervalSec }, "syncFromSharedDrive: starting");
 
   if (!watch) {
     const result = await runOnce();
-    await scoringQueue().close();
-    await prisma.$disconnect();
     logger.info(result, "syncFromSharedDrive: complete");
+    await shutdown(0);
     return;
   }
 
@@ -208,12 +238,10 @@ async function main() {
     if (stopping) break;
     await new Promise((r) => setTimeout(r, intervalSec * 1000));
   }
-  await scoringQueue().close();
-  await prisma.$disconnect();
+  await shutdown(0);
 }
 
 main().catch(async (err) => {
   logger.error({ err }, "syncFromSharedDrive: fatal");
-  await prisma.$disconnect().catch(() => {});
-  process.exit(1);
+  await shutdown(1);
 });

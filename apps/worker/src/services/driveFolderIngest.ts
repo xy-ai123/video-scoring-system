@@ -271,17 +271,34 @@ async function ingestOne(
 
   if (!submission) return null;
 
-  const q = scoringQueue();
-  await q.addBulk(
-    submission.files.map((vf) => ({
-      name: "score-submission",
-      data: { fileId: vf.id, submissionId: vf.submissionId },
-      // Same convention as the webhook's enqueue helper. The processor's
-      // idempotency check (skip if scoringStatus===COMPLETED) handles any
-      // accidental re-enqueue safely.
-      opts: { jobId: `score-${vf.id}` as string },
-    })),
-  );
+  // Best-effort scoring enqueue. If Redis is unreachable (e.g. Railway
+  // deploy without a worker), log + continue: the DB row exists, the
+  // dashboard shows it as PENDING, and the next sync where Redis is
+  // reachable will pick the row up via the `scoringStatus = PENDING`
+  // backfill path. The previous unconditional `await q.addBulk(...)`
+  // hung the whole sync subprocess on Railway because ioredis retried
+  // the connect forever — "Syncing Drive…" got stuck until a redeploy.
+  try {
+    const q = scoringQueue();
+    await q.addBulk(
+      submission.files.map((vf) => ({
+        name: "score-submission",
+        data: { fileId: vf.id, submissionId: vf.submissionId },
+        // Same convention as the webhook's enqueue helper. The processor's
+        // idempotency check (skip if scoringStatus===COMPLETED) handles any
+        // accidental re-enqueue safely.
+        opts: { jobId: `score-${vf.id}` as string },
+      })),
+    );
+  } catch (err) {
+    logger.warn(
+      {
+        submissionId: submission.id,
+        errMessage: err instanceof Error ? err.message : String(err),
+      },
+      "drive folder ingest: scoring enqueue failed (continuing; submission already in DB)",
+    );
+  }
 
   const vf = submission.files[0];
   if (!vf) return null;

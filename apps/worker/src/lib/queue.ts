@@ -25,8 +25,27 @@ let _connection: IORedis | undefined;
 export function redisConnection(): IORedis {
   if (_connection) return _connection;
   _connection = new IORedis(env.REDIS_URL, {
-    maxRetriesPerRequest: null,
+    // `null` was originally chosen to match BullMQ workers' need to wait
+    // out a transient Redis outage forever. That's correct for the
+    // long-running worker process — but when the WEB app spawns a
+    // one-shot sync script (syncFromSharedDrive) in an environment
+    // without Redis (Railway, where the placeholder REDIS_URL points
+    // at a non-existent localhost), the unbounded retry meant every
+    // scoringQueue.addBulk() call hung indefinitely and the subprocess
+    // never exited — the dashboard "Syncing Drive…" button got stuck
+    // visible until a Railway redeploy. Limit retries-per-command so
+    // attempts fail fast (~5-10s total) when there's no Redis. Real
+    // worker uptime is unaffected because the retry budget refreshes
+    // per command — only catastrophic outages get capped.
+    maxRetriesPerRequest: 3,
     enableReadyCheck: false,
+    // Cap the initial-connect retry storm too: only N attempts before
+    // we surface the error to callers (who can try/catch it).
+    connectTimeout: 3000,
+    retryStrategy(times: number): number | null {
+      if (times > 3) return null; // give up
+      return Math.min(times * 200, 1000);
+    },
   });
   _connection.on("error", (err) => logger.error({ err }, "redis error"));
   return _connection;
