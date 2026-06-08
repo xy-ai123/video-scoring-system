@@ -63,6 +63,12 @@ export type DriveSyncState = {
   log: string[];
   /** Parsed totals from the final `syncFromSharedDrive: complete` line. */
   result: DriveSyncResult | null;
+  /** ISO timestamp set when the auto-sync timer was armed (i.e. when
+   *  the Next.js instrumentation hook fired). Null if auto-sync is
+   *  disabled or instrumentation never ran. Persists across sync
+   *  state resets so operators can confirm auto-sync is active even
+   *  between ticks. */
+  autoSyncArmedAt: string | null;
 };
 
 export type DriveSyncResult = {
@@ -81,6 +87,7 @@ const state: DriveSyncState = {
   exitCode: null,
   log: [],
   result: null,
+  autoSyncArmedAt: null,
 };
 let activeChild: ChildProcess | null = null;
 
@@ -297,6 +304,11 @@ export function startAutoSyncTimer(): void {
     // Explicitly disabled via env.
     return;
   }
+  // Persistent marker so a quick GET /api/admin/sync-drive can confirm
+  // the instrumentation hook fired. state.log gets wiped on every new
+  // sync, but autoSyncArmedAt survives — operators can verify auto-sync
+  // is active even after dozens of ticks have happened.
+  state.autoSyncArmedAt = new Date().toISOString();
 
   // Kick off the first run after a brief delay so the server has
   // settled (Postgres pool warmed, Drive client built lazily on first
