@@ -98,7 +98,10 @@ async function findCorruptSubmissions(): Promise<CorruptRow[]> {
   for (const s of subs) {
     if (s.files.length === 0) continue; // no files → not "corrupt"
     const allCorrupt = s.files.every((f) => {
-      if (f.durationSec === 0) return true;
+      // Sub-second values (0, 0.25, 0.99, etc.) are all junk readings —
+      // see /admin/page.tsx's corrupt predicate. Operators upload
+      // trimmed clips ≥1s.
+      if (f.durationSec != null && f.durationSec < 1) return true;
       if (f.durationSec == null) {
         if (f.durationProbeAttempts >= CORRUPT_PROBE_THRESHOLD) return true;
         // Legacy local-Mac fallback: if the worker's local attempts

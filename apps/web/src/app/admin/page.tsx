@@ -125,7 +125,12 @@ export default async function AdminHomePage({
     let total = 0;
     let measured = false;
     for (const v of byDriveId.values()) {
-      if (v != null) {
+      // Sub-second values are junk readings (see the corrupt predicate
+      // below). Skip them so the Total Video Duration card stays honest:
+      // they don't contribute meaningfully and including them would mark
+      // the row "measured" while the duration cell shows CORRUPT —
+      // inconsistent. >=1s is the same threshold used everywhere else.
+      if (v != null && v >= 1) {
         total += v;
         measured = true;
       }
@@ -193,9 +198,12 @@ export default async function AdminHomePage({
     const isClipped = s.files.some((f) => HAS_CLIPPED_SUFFIX.test(f.fileName));
     // A submission is "corrupt" when EVERY file is unmeasurable. Two
     // ways a file qualifies as unmeasurable:
-    //   1. durationSec === 0 — probe got a junk-zero reading (Drive
-    //      metadata had 0, ffprobe head/tail returned 0). Immediate
-    //      flag because real 0-second videos are implausible.
+    //   1. 0 <= durationSec < 1 — probe got a sub-second junk reading
+    //      (Drive metadata had 0 or a fractional partial value, ffprobe
+    //      head/tail returned 0 / 0.25 / etc.). Immediate flag because
+    //      real <1s clips are implausible — operators upload trimmed
+    //      videos ≥1s. Covers the exact-0 case AND fractional readings
+    //      like 0.25 that previously slipped through and rendered "0:00".
     //   2. durationSec is null AND we've tried ≥ CORRUPT_PROBE_THRESHOLD
     //      times — the probe just won't extract a duration. After enough
     //      attempts, treat the file as broken.
@@ -207,7 +215,7 @@ export default async function AdminHomePage({
       s.files.length > 0 &&
       s.files.every(
         (f) =>
-          f.durationSec === 0 ||
+          (f.durationSec != null && f.durationSec < 1) ||
           (f.durationSec == null &&
             f.durationProbeAttempts >= CORRUPT_PROBE_THRESHOLD),
       );

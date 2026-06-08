@@ -317,14 +317,23 @@ async function fillDurationFor(
   log = logger,
 ): Promise<boolean> {
   // Probe outcomes:
-  //   - durationSec > 0           — real value; store + reset attempt counter.
-  //   - durationSec === 0         — measured-but-empty; store 0 + bump attempts.
-  //                                 (the dashboard treats 0 as immediately corrupt;
-  //                                 we keep bumping so a later Sync that finally
-  //                                 gets a real value resets the counter cleanly.)
-  //   - durationSec === null      — couldn't measure at all; leave durationSec
-  //                                 alone + bump attempts.
-  //   - exception thrown          — same as null: bump attempts, leave durationSec.
+  //   - durationSec >= 1          — real value; store + reset attempt counter.
+  //   - durationSec in [0, 1)     — sub-second junk reading (Drive's
+  //                                 videoMediaMetadata returned a fractional
+  //                                 value while still processing, ffprobe HEAD
+  //                                 probe partial header). Operators upload
+  //                                 trimmed clips ≥1s, so anything below 1
+  //                                 is treated as the same case as exactly 0:
+  //                                 store the value + bump attempts so the
+  //                                 next sync re-measures.
+  //   - durationSec === null      — couldn't measure at all; bump attempts,
+  //                                 leave durationSec.
+  //   - exception thrown          — same as null: bump attempts, leave
+  //                                 durationSec untouched.
+  //
+  // The "store the value" branch matters even for junk: it overwrites a
+  // previous junk value so the UI corrupt detector (which now flags
+  // 0 <= durationSec < 1) updates immediately on the next /admin render.
   try {
     const { durationSec, source } =
       await measureDriveVideoDuration(driveFileId);
@@ -341,7 +350,7 @@ async function fillDurationFor(
       return false;
     }
 
-    if (durationSec > 0) {
+    if (durationSec >= 1) {
       await prisma.videoFile.update({
         where: { id: videoFileId },
         data: { durationSec, durationProbeAttempts: 0 },
@@ -353,17 +362,17 @@ async function fillDurationFor(
       return true;
     }
 
-    // durationSec === 0 (or negative — defensive). Treat as failed probe:
-    // store the 0 so the UI's "render — for value <= 0" rule kicks in AND
-    // bump the counter so threshold-based CORRUPT detection ticks toward
-    // its limit.
+    // 0 <= durationSec < 1 (or negative — defensive). Junk reading;
+    // store + bump attempts so threshold-based CORRUPT detection ticks
+    // forward AND a real value on a later sync resets the counter
+    // cleanly (the >= 1 branch above wipes it back to 0).
     await prisma.videoFile.update({
       where: { id: videoFileId },
       data: { durationSec, durationProbeAttempts: { increment: 1 } },
     });
     log.warn(
-      { videoFileId, driveFileId, fileName, source },
-      "drive ingest: duration measured as 0 — junk reading, will retry next sync",
+      { videoFileId, driveFileId, fileName, durationSec, source },
+      "drive ingest: duration measured as sub-second — junk reading, will retry next sync",
     );
     return false;
   } catch (err) {
@@ -996,18 +1005,17 @@ export async function ingestFromDriveFolder(
     ]),
   );
   const fresh = files.filter((f) => !knownByDriveId.has(f.id));
-  // Match the UI: durationSec of 0 is treated as "not yet measured"
-  // (formatDurationSec renders `—` for both null and 0). A real 0-second
-  // video is implausible — operators upload trimmed clips ≥1s. So if
-  // we ever stored 0 it was a junk measurement (Drive metadata not
-  // ready, ffprobe HEAD probe returning 0, etc.) and the row should
-  // get another shot on the next Phase 2 pass. Otherwise the row
-  // would be visually "—" forever but the backfill loop would never
-  // pick it up again.
+  // Match the UI: any durationSec < 1 (including null AND fractional
+  // sub-second readings like 0.25 — see fillDurationFor for the why)
+  // is treated as "not yet measured". Operators upload trimmed clips
+  // ≥1s, so any reading below 1 was a junk measurement and the row
+  // should get another shot on the next Phase 2 pass. Otherwise the
+  // row would be visually CORRUPT forever but the backfill loop
+  // would never re-probe to recover.
   const knownNeedingDuration = files.filter((f) => {
     const r = knownByDriveId.get(f.id);
     if (!r) return false;
-    return r.durationSec == null || r.durationSec === 0;
+    return r.durationSec == null || r.durationSec < 1;
   });
   // Metadata-refresh diff: pick up Drive-side changes to fileName, mimeType,
   // OR sizeBytes. Renaming a file in Drive is the common case; replace-in-
