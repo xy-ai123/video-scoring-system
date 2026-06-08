@@ -151,7 +151,9 @@ export function getDriveSyncState(): DriveSyncState {
   return { ...state, log: state.log.slice() };
 }
 
-export function startDriveSync():
+export function startDriveSync(
+  opts: { phase1Only?: boolean; trigger?: "manual" | "auto" } = {},
+):
   | { started: true }
   | { started: false; reason: string } {
   if (state.running) return { started: false, reason: "already_running" };
@@ -170,9 +172,12 @@ export function startDriveSync():
   state.exitCode = null;
   state.result = null;
   state.log = [];
-  pushLog(`$ tsx ${path.relative(repoRoot(), script)}`);
+  const args = [script];
+  if (opts.phase1Only) args.push("--phase1-only");
+  const triggerTag = opts.trigger === "auto" ? " [auto]" : "";
+  pushLog(`$ tsx ${path.relative(repoRoot(), script)}${opts.phase1Only ? " --phase1-only" : ""}${triggerTag}`);
 
-  const child = spawn(tsx, [script], {
+  const child = spawn(tsx, args, {
     cwd: workerDir(),
     env: {
       ...process.env,
@@ -248,4 +253,79 @@ export function startDriveSync():
   });
 
   return { started: true };
+}
+
+// ─── Auto-sync timer ────────────────────────────────────────────────────
+//
+// Triggered once at server startup from `instrumentation.ts`. Every
+// AUTO_SYNC_INTERVAL_MS we call `startDriveSync({ phase1Only: true })`
+// — same code path as the dashboard's manual button, just with the
+// fast-only flag so each auto tick finishes in ~30-45s instead of
+// ~3 min. If a sync is already in flight (manual click + auto tick
+// collision), startDriveSync returns `already_running` and we skip
+// — operators never see auto-runs fight their button presses.
+//
+// Why a setInterval inside the Next.js process instead of a Railway
+// cron service: zero extra infrastructure, no extra deploy unit, and
+// the cron behaviour comes "for free" because Railway runs Next.js
+// as a persistent Node.js process (not Vercel-style serverless). When
+// the container restarts, the timer naturally restarts too.
+// ────────────────────────────────────────────────────────────────────────
+
+/** Default 5-minute cadence. Tunable via the AUTO_SYNC_INTERVAL_MIN
+ *  env var so we can dial up/down without a code change (e.g. set to
+ *  0 to disable entirely). */
+const AUTO_SYNC_INTERVAL_MS = (() => {
+  const raw = process.env.AUTO_SYNC_INTERVAL_MIN;
+  const parsed = raw ? Number(raw) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return Math.floor(parsed * 60_000);
+  }
+  return 5 * 60_000;
+})();
+
+let autoSyncTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Idempotent — calling twice is a no-op. Safe to invoke from
+ * instrumentation.ts which Next.js can re-execute on hot reload in
+ * dev. Pass `interval = 0` (via AUTO_SYNC_INTERVAL_MIN=0) to disable.
+ */
+export function startAutoSyncTimer(): void {
+  if (autoSyncTimer) return;
+  if (AUTO_SYNC_INTERVAL_MS <= 0) {
+    // Explicitly disabled via env.
+    return;
+  }
+
+  // Kick off the first run after a brief delay so the server has
+  // settled (Postgres pool warmed, Drive client built lazily on first
+  // call). 30s is enough to avoid colliding with startup work but
+  // short enough that operators see auto-sync activity quickly after
+  // a deploy.
+  const FIRST_RUN_DELAY_MS = 30_000;
+
+  function tick(): void {
+    const r = startDriveSync({ phase1Only: true, trigger: "auto" });
+    if (!r.started) {
+      // Manual sync is already in flight — skip this tick. The next
+      // one in 5 min will pick up whatever's new since.
+      // (Log to the same in-memory log so operators can see it on
+      //  the sync state endpoint if they're curious.)
+      pushLog(`! auto-sync skipped: ${r.reason}`);
+    }
+  }
+
+  setTimeout(() => {
+    tick();
+    autoSyncTimer = setInterval(tick, AUTO_SYNC_INTERVAL_MS);
+  }, FIRST_RUN_DELAY_MS);
+}
+
+/** Stop the timer. Mainly for testing — production never calls this. */
+export function stopAutoSyncTimer(): void {
+  if (autoSyncTimer) {
+    clearInterval(autoSyncTimer);
+    autoSyncTimer = null;
+  }
 }

@@ -56,20 +56,31 @@ async function listAllSharedFolders(): Promise<{ id: string; name: string }[]> {
   return out;
 }
 
-function parseArgs(argv: string[]): { watch: boolean; intervalSec: number } {
+function parseArgs(argv: string[]): {
+  watch: boolean;
+  intervalSec: number;
+  phase1Only: boolean;
+} {
   let watch = false;
   let intervalSec = 60;
+  // When true, skip Phase 2 (duration backfill) and the ZIP archive
+  // ingest. Used by the auto-sync timer so it can finish in ~30-45s
+  // instead of ~3 min — auto runs frequently, so duration backfill
+  // can wait for the next manual button press.
+  let phase1Only = false;
   for (const a of argv) {
     if (a === "--watch") watch = true;
+    if (a === "--phase1-only") phase1Only = true;
     const m = a.match(/^--interval=(\d+)$/);
     if (m && m[1]) {
       intervalSec = Math.max(15, Math.min(3600, Number(m[1])));
     }
   }
-  return { watch, intervalSec };
+  return { watch, intervalSec, phase1Only };
 }
 
-async function runOnce() {
+async function runOnce(opts: { phase1Only?: boolean } = {}) {
+  const phase1Only = opts.phase1Only === true;
   // 1. Raw video files — uses the existing battle-tested ingester per folder.
   const folders = await listAllSharedFolders();
   logger.info({ count: folders.length }, "syncFromSharedDrive: folders");
@@ -143,14 +154,34 @@ async function runOnce() {
     "syncFromSharedDrive: phase 1 (fast) done",
   );
 
-  // ─── PHASE 2: slow tail ────────────────────────────────────────────────
+  // ─── PHASE 2: slow tail (skipped when --phase1-only) ─────────────────
   // Backfill `durationSec` for rows still missing it + run sheet sync.
   // May get SIGTERM'd by Railway before completing; that's acceptable —
   // the next sync tick picks up where this one left off (both operations
   // are idempotent and bounded by their own "needs work?" predicates).
   // Phase 1 already handled every user-visible state change, so a
   // mid-folder kill here is invisible to operators.
+  //
+  // Auto-sync (every 5 min) passes --phase1-only and returns here
+  // immediately. Durations + sheet sync still happen on the next
+  // manual Sync Drive click. Keeps the 5-min cycle light.
   // ───────────────────────────────────────────────────────────────────────
+  if (phase1Only) {
+    logger.info(
+      { ...rawTotals, phase1Renamed, phase1CategoriesUpdated },
+      "syncFromSharedDrive: raw videos done (phase 1 only)",
+    );
+    // Empty zipSummary so the caller's shape stays uniform.
+    return {
+      rawTotals,
+      zipSummary: {
+        zipsScanned: 0,
+        videosIngested: 0,
+        softDeleted: 0,
+        errors: 0,
+      },
+    };
+  }
   for (const folder of folders) {
     try {
       const s = await ingestFromDriveFolder(folder.id, {
@@ -208,11 +239,14 @@ async function shutdown(exitCode: number): Promise<never> {
 }
 
 async function main() {
-  const { watch, intervalSec } = parseArgs(process.argv.slice(2));
-  logger.info({ watch, intervalSec }, "syncFromSharedDrive: starting");
+  const { watch, intervalSec, phase1Only } = parseArgs(process.argv.slice(2));
+  logger.info(
+    { watch, intervalSec, phase1Only },
+    "syncFromSharedDrive: starting",
+  );
 
   if (!watch) {
-    const result = await runOnce();
+    const result = await runOnce({ phase1Only });
     logger.info(result, "syncFromSharedDrive: complete");
     await shutdown(0);
     return;
@@ -229,7 +263,7 @@ async function main() {
   }
   while (!stopping) {
     try {
-      const result = await runOnce();
+      const result = await runOnce({ phase1Only });
       logger.info(result, "syncFromSharedDrive: tick complete");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
