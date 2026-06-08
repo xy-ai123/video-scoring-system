@@ -19,6 +19,7 @@ import {
   Clock,
   Loader2,
   Pencil,
+  Play,
   Search,
   Trash2,
   X,
@@ -241,6 +242,44 @@ export function SubmissionsTable({
   // "select all" checkbox and counter reflect only what's visible.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Tracks which submission is currently being scored on-demand. Used to
+  // disable the per-row Score button + show a spinner while the POST is
+  // in flight. Mock scoring (deterministic from filename) — see
+  // /api/submissions/[id]/score for why we use the on-demand path
+  // instead of running a real scoring worker. Round-trip is < 1s in
+  // practice but we still gate the UI so a double-click can't fire a
+  // second request.
+  const [scoringId, setScoringId] = useState<string | null>(null);
+  const scoreOne = useCallback(
+    async (rowId: string): Promise<void> => {
+      if (scoringId) return;
+      setScoringId(rowId);
+      try {
+        const res = await fetch(`/api/submissions/${rowId}/score`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as
+            | { error?: string }
+            | null;
+          window.alert(
+            `Couldn't score: ${data?.error ?? `HTTP ${res.status}`}`,
+          );
+          return;
+        }
+        // Pull in the new SCORED status + score values from the server.
+        router.refresh();
+      } catch (err) {
+        window.alert(
+          `Couldn't score (network error): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        setScoringId(null);
+      }
+    },
+    [scoringId, router],
+  );
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   const [bulkPicOpen, setBulkPicOpen] = useState(false);
@@ -1415,6 +1454,25 @@ export function SubmissionsTable({
                   </div>
                   <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-slate-300" />
                 </Link>
+                {/* Score button — placed OUTSIDE the Link wrapper because
+                    <button> inside <a> is invalid HTML. Same gate as the
+                    desktop button: admin only, PENDING + not corrupt. */}
+                {!readOnly && r.status === "PENDING" && !r.corrupt ? (
+                  <button
+                    type="button"
+                    onClick={() => scoreOne(r.id)}
+                    disabled={scoringId !== null}
+                    title="Score this submission now (mock engine)"
+                    className="mr-3 mt-3 inline-flex shrink-0 items-center gap-1 self-start rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-50"
+                  >
+                    {scoringId === r.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" />
+                    )}
+                    {scoringId === r.id ? "Scoring…" : "Score"}
+                  </button>
+                ) : null}
               </li>
               );
               });
@@ -1705,6 +1763,29 @@ export function SubmissionsTable({
                         >
                           View
                         </Link>
+                        {/* On-demand Score button — only on PENDING rows
+                            that aren't flagged CORRUPT, hidden for guests
+                            (read-only). Runs the mock-engine path on the
+                            server, refreshes the route once done so the
+                            row flips to SCORED. Disabled while ANY row's
+                            scoring is in flight to avoid double-clicks
+                            and to keep visual state simple. */}
+                        {!readOnly && r.status === "PENDING" && !r.corrupt ? (
+                          <button
+                            type="button"
+                            onClick={() => scoreOne(r.id)}
+                            disabled={scoringId !== null}
+                            title="Score this submission now (mock engine)"
+                            className="ml-1 inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-50"
+                          >
+                            {scoringId === r.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Play className="h-3.5 w-3.5" />
+                            )}
+                            {scoringId === r.id ? "Scoring…" : "Score"}
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                         );
