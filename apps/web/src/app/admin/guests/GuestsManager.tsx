@@ -18,6 +18,43 @@ import { Pencil, Plus, Save, Trash2, X } from "lucide-react";
  * fresh data from the server.
  */
 
+/**
+ * Pick the most specific message available from the API's error payload.
+ * The /api/admin/guests* routes use TWO different error shapes:
+ *
+ *   1. lib-level throws  (e.g. "Username can only contain ...") → returned as
+ *      { error: "...", message: "..." }
+ *   2. zod schema rejects → returned as
+ *      { error: "invalid_body", issues: [{ message, path }] }
+ *
+ * Without parsing the second shape, the UI fell back to a generic
+ * "Couldn't create guest." that hid the real reason (e.g. "String must
+ * contain at least 2 character(s)" when the username was too short).
+ * Order of preference: human message > first zod issue message > fallback.
+ */
+function extractErrorMessage(data: unknown, fallback: string): string {
+  if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>;
+    const msg = typeof d.message === "string" ? d.message.trim() : "";
+    if (msg) return msg;
+    const issues = Array.isArray(d.issues) ? (d.issues as unknown[]) : null;
+    if (issues && issues.length > 0) {
+      const first = issues[0];
+      if (first && typeof first === "object") {
+        const m = (first as Record<string, unknown>).message;
+        const p = (first as Record<string, unknown>).path;
+        const field = Array.isArray(p) && p.length > 0 ? String(p[0]) : "";
+        if (typeof m === "string" && m.trim()) {
+          return field ? `${field}: ${m}` : m;
+        }
+      }
+    }
+    const err = typeof d.error === "string" ? d.error.trim() : "";
+    if (err && err !== "invalid_body") return err;
+  }
+  return fallback;
+}
+
 export type GuestRow = {
   id: string;
   username: string;
@@ -89,7 +126,7 @@ export function GuestsManager({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setCreateErr(data?.message ?? "Couldn't create guest.");
+        setCreateErr(extractErrorMessage(data, "Couldn't create guest."));
         setCreateBusy(false);
         return;
       }
@@ -150,7 +187,7 @@ export function GuestsManager({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setEditErr(data?.message ?? "Couldn't save changes.");
+        setEditErr(extractErrorMessage(data, "Couldn't save changes."));
         setEditBusy(false);
         return;
       }

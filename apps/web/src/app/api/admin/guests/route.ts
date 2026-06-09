@@ -18,7 +18,10 @@ export const dynamic = "force-dynamic";
  */
 
 const BodySchema = z.object({
-  username: z.string().min(3).max(120),
+  // 2-char minimum — see lib/guestUser.ts validateUsername. Keeps
+  // schema and lib in sync so the zod rejection message and the
+  // lib throw message agree.
+  username: z.string().min(2).max(120),
   password: z.string().min(6).max(200),
   allowedMain: z.string().min(1).max(200),
 });

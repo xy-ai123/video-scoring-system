@@ -30,7 +30,9 @@ export const dynamic = "force-dynamic";
 
 const BodySchema = z.object({
   currentPassword: z.string().min(1).max(200),
-  newUsername: z.string().min(3).max(120).optional(),
+  // 2-char minimum mirrors guest username rules — same character
+  // allowlist + same lower bound. See lib/adminUser.ts.
+  newUsername: z.string().min(2).max(120).optional(),
   newPassword: z.string().min(8).max(200).optional(),
 });
 

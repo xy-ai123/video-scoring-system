@@ -192,8 +192,12 @@ export async function listGuests(): Promise<
  *  drift between the two paths. */
 function validateUsername(input: string): string {
   const u = input.trim().toLowerCase();
-  if (u.length < 3 || u.length > 120) {
-    throw new Error("Username must be 3–120 characters.");
+  // 2-char minimum so operator-friendly short names like "cm" (for the
+  // "Restaurant CM" main) are usable. The character allowlist below is
+  // the actual safety net — even 2-char usernames must be lowercase
+  // alphanumeric + . _ -, so e.g. "1" is out and "ab" is in.
+  if (u.length < 2 || u.length > 120) {
+    throw new Error("Username must be 2–120 characters.");
   }
   if (!/^[a-z0-9._-]+$/.test(u)) {
     throw new Error(

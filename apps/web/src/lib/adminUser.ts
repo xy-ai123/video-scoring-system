@@ -177,8 +177,10 @@ export async function updateAdminCredentials(
 
   if (patch.newUsername !== undefined) {
     const u = patch.newUsername.trim().toLowerCase();
-    if (u.length < 3 || u.length > 120) {
-      throw new Error("Username must be 3–120 characters.");
+    // See lib/guestUser.ts — mirroring the 2-char minimum so admin
+    // usernames have the same lower bound as guest usernames.
+    if (u.length < 2 || u.length > 120) {
+      throw new Error("Username must be 2–120 characters.");
     }
     // Block whitespace / special chars beyond a sane allowlist so we
     // don't end up with URL-unsafe usernames in logs.

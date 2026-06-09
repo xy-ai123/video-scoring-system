@@ -11,14 +11,15 @@ export const dynamic = "force-dynamic";
  * DELETE /api/admin/guests/[id]  — hard-delete a guest row
  *
  * Both admin-only. PATCH body fields are all optional:
- *   - newUsername?    (3-120 chars, lowercase alphanumeric + . _ -)
+ *   - newUsername?    (2-120 chars, lowercase alphanumeric + . _ -)
  *   - newPassword?    (≥6 chars)
  *   - newAllowedMain? (1-200 chars; admin picks from getDriveMains in the UI)
  * Omit fields you don't want to change.
  */
 
 const PatchSchema = z.object({
-  newUsername: z.string().min(3).max(120).optional(),
+  // 2-char minimum mirrors POST /api/admin/guests + lib/guestUser.ts.
+  newUsername: z.string().min(2).max(120).optional(),
   newPassword: z.string().min(6).max(200).optional(),
   newAllowedMain: z.string().min(1).max(200).optional(),
 });
