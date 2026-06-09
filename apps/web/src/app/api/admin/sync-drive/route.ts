@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getCurrentAdmin } from "@/lib/auth";
 import { getDriveSyncState, startDriveSync } from "@/lib/driveSync";
 
@@ -16,7 +16,23 @@ export const dynamic = "force-dynamic";
  *   totals once complete). The dashboard polls this every ~2s while
  *   the sync runs so the button can show a live spinner + result count.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  // CSRF defence — match the per-submission endpoints (approve, reject,
+  // score, etc.). SameSite=Lax already protects against most cross-site
+  // POSTs but a strict Origin check rules out the rest. Without this,
+  // a malicious page could trick a logged-in admin into firing a
+  // 3-minute Drive sweep on their behalf.
+  const origin = req.headers.get("origin");
+  const host = req.headers.get("host");
+  if (origin) {
+    try {
+      if (new URL(origin).host !== host) {
+        return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+      }
+    } catch {
+      return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+    }
+  }
   const admin = await getCurrentAdmin();
   if (!admin) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

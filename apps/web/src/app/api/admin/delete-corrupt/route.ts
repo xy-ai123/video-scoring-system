@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 // Plain (no `node:` prefix) — see driveSync.ts for why.
 import fs from "fs";
 import os from "os";
@@ -132,7 +132,22 @@ export async function GET() {
   return NextResponse.json({ corrupt, count: corrupt.length });
 }
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  // CSRF defence — match the per-submission endpoints. Without this,
+  // a malicious page could trick a logged-in admin into bulk-soft-
+  // deleting every CORRUPT-flagged submission. Reversible via /admin/
+  // trash, but still an annoying gap to leave open.
+  const origin = req.headers.get("origin");
+  const host = req.headers.get("host");
+  if (origin) {
+    try {
+      if (new URL(origin).host !== host) {
+        return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+      }
+    } catch {
+      return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+    }
+  }
   const admin = await getCurrentAdmin();
   if (!admin) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
