@@ -7,6 +7,7 @@ import {
   pipelineRoot,
   clipsDir,
   incomingDir,
+  getHandoffFolder,
 } from "@/lib/clipping";
 import { getDriveMains } from "@/lib/driveMains";
 import fs from "node:fs";
@@ -77,6 +78,7 @@ export async function GET() {
         pipelineRoot: root,
         clips: [],
         incoming: [],
+        destination: getHandoffFolder(),
       },
       { status: 200 },
     );
@@ -114,5 +116,6 @@ export async function GET() {
     incomingDir: incomingDir(),
     clips,
     incoming: listIncoming(),
+    destination: getHandoffFolder(),
   });
 }

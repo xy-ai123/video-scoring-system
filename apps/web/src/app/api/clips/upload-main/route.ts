@@ -5,7 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { getCurrentAdmin } from "@/lib/auth";
-import { pipelineRoot, resolveClipPath, venvPython } from "@/lib/clipping";
+import {
+  getHandoffFolder,
+  handoffFolderArgs,
+  pipelineRoot,
+  resolveClipPath,
+  venvPython,
+} from "@/lib/clipping";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -116,9 +122,15 @@ export async function POST(req: NextRequest) {
   const exe = fs.existsSync(python) ? python : "python3";
 
   return new Promise<NextResponse>((resolve) => {
+    const handoff = getHandoffFolder();
     const child = spawn(
       exe,
-      ["upload_group_to_drive.py", "--manifest", manifestPath],
+      [
+        "upload_group_to_drive.py",
+        "--manifest",
+        manifestPath,
+        ...handoffFolderArgs(),
+      ],
       {
         cwd: pipelineRoot(),
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
@@ -163,6 +175,7 @@ export async function POST(req: NextRequest) {
             failed,
             skipped,
             folderUrl,
+            destination: handoff,
             log,
           },
           { status: code === 0 && failed === 0 ? 200 : 207 },
@@ -181,6 +194,7 @@ export async function POST(req: NextRequest) {
             ok: false,
             mainName,
             error: err.message,
+            destination: handoff,
             log: chunks.join(""),
           },
           { status: 500 },

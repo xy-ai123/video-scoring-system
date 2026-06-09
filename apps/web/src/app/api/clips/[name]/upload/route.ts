@@ -4,6 +4,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { getCurrentAdmin } from "@/lib/auth";
 import {
+  getHandoffFolder,
+  handoffFolderArgs,
   pipelineRoot,
   resolveClipPath,
   venvPython,
@@ -44,7 +46,8 @@ export async function POST(
 
   const python = venvPython();
   const exe = fs.existsSync(python) ? python : "python3";
-  const args = ["upload_clips_to_drive.py"];
+  const handoff = getHandoffFolder();
+  const args = ["upload_clips_to_drive.py", ...handoffFolderArgs()];
   if (force) args.push("--force");
 
   return new Promise<NextResponse>((resolve) => {
@@ -59,7 +62,12 @@ export async function POST(
       const log = chunks.join("");
       resolve(
         NextResponse.json(
-          { exitCode: code, log, file: path.basename(full) },
+          {
+            exitCode: code,
+            log,
+            file: path.basename(full),
+            destination: handoff,
+          },
           { status: code === 0 ? 200 : 500 },
         ),
       );
@@ -67,7 +75,11 @@ export async function POST(
     child.on("error", (err) => {
       resolve(
         NextResponse.json(
-          { error: err.message, log: chunks.join("") },
+          {
+            error: err.message,
+            log: chunks.join(""),
+            destination: handoff,
+          },
           { status: 500 },
         ),
       );

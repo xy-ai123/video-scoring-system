@@ -44,6 +44,8 @@ type IncomingRow = {
   mtime: string;
 };
 
+type DestinationFolder = { id: string | null; name: string };
+
 type ClipsApiResponse = {
   pipelineRoot: string;
   clipsDir?: string;
@@ -52,6 +54,7 @@ type ClipsApiResponse = {
   incoming: IncomingRow[];
   error?: string;
   message?: string;
+  destination?: DestinationFolder;
 };
 
 type RunState = {
@@ -387,6 +390,8 @@ export function ClippingDashboard({
   // sequences sub-groups internally), so a single state value is fine.
   const [uploadingMain, setUploadingMain] = useState<string | null>(null);
 
+  const destinationName = data?.destination?.name ?? "Robot Video Pipeline";
+
   const uploadMainToDrive = useCallback(
     async (
       mainName: string,
@@ -405,7 +410,7 @@ export function ClippingDashboard({
         subGroups.length > 6 ? `\n  …and ${subGroups.length - 6} more` : "";
       const confirmed = window.confirm(
         `Upload ${totalClips} clip${totalClips === 1 ? "" : "s"} into ` +
-          `Drive folder "${mainName}/"?\n\n` +
+          `"${destinationName}/${mainName}/"?\n\n` +
           `Sub-folders that will be created/reused:\n${subSummary}${more}` +
           "\n\nAlready-uploaded clips will be MOVED into their new " +
           "subfolder (metadata-only, no re-upload). Brand-new clips " +
@@ -430,18 +435,20 @@ export function ClippingDashboard({
           failed?: number;
           folderUrl?: string | null;
           error?: string;
+          destination?: DestinationFolder;
         };
+        const destLabel = json.destination?.name ?? destinationName;
         if (!res.ok && res.status !== 207) {
           setErrorBanner(
-            `Main upload failed: ${json.error ?? `HTTP ${res.status}`}`,
+            `Upload to ${destLabel}/${mainName}/ failed: ${json.error ?? `HTTP ${res.status}`}`,
           );
         } else if (!json.ok) {
           const moved = json.moved ?? 0;
           const uploaded = json.uploaded ?? 0;
           const failed = json.failed ?? 0;
           setErrorBanner(
-            `Main upload partial: ${moved} moved, ${uploaded} uploaded, ` +
-              `${failed} failed. See server logs for details.`,
+            `Partial upload to ${destLabel}/${mainName}/: ${moved} moved, ` +
+              `${uploaded} uploaded, ${failed} failed. See server logs.`,
           );
         }
         if (json.folderUrl) {
@@ -454,7 +461,7 @@ export function ClippingDashboard({
         setUploadingMain(null);
       }
     },
-    [refresh],
+    [refresh, destinationName],
   );
 
   // ---- "Already clipped" lookup -------------------------------------
@@ -835,10 +842,18 @@ export function ClippingDashboard({
     <div className="space-y-4">
       {/* Banner: pipeline path / errors */}
       {pipelineMissing ? (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          <strong>Pipeline not found.</strong>{" "}
-          {data?.message ??
-            "Set ROBOT_PIPELINE_PATH in .env or place the project at ~/robot-video-pipeline."}
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+          <strong>Clipping runs on the local operator instance.</strong>{" "}
+          The Python pipeline (ffmpeg + MediaPipe + Drive auth) lives on
+          the Mac, not on Railway. To run clipping, open this dashboard
+          on the local machine:{" "}
+          <a
+            href="http://localhost:3000/admin/clipping"
+            className="font-medium underline hover:text-blue-700"
+          >
+            http://localhost:3000/admin/clipping
+          </a>
+          . The submissions list below is still useful for review.
         </div>
       ) : null}
       {errorBanner ? (
@@ -856,24 +871,26 @@ export function ClippingDashboard({
 
       {/* Action bar */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
-        <button
-          type="button"
-          onClick={startRun}
-          disabled={!!run?.running || pipelineMissing}
-          className={clsx(
-            "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium",
-            run?.running || pipelineMissing
-              ? "cursor-not-allowed bg-slate-100 text-slate-400"
-              : "bg-slate-900 text-white hover:bg-slate-700",
-          )}
-        >
-          {run?.running ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Play className="h-4 w-4" />
-          )}
-          {run?.running ? "Running…" : "Run clipping now"}
-        </button>
+        {pipelineMissing ? null : (
+          <button
+            type="button"
+            onClick={startRun}
+            disabled={!!run?.running}
+            className={clsx(
+              "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium",
+              run?.running
+                ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                : "bg-slate-900 text-white hover:bg-slate-700",
+            )}
+          >
+            {run?.running ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+            {run?.running ? "Running…" : "Run clipping now"}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => void refresh({ fromUserClick: true })}
@@ -1077,7 +1094,7 @@ export function ClippingDashboard({
               </span>
             </h2>
             <div className="flex items-center gap-2 text-xs text-slate-400">
-              {rawSelected.size + formSelected.size > 0 ? (
+              {rawSelected.size + formSelected.size > 0 && !pipelineMissing ? (
                 <>
                   <button
                     type="button"
@@ -1403,6 +1420,17 @@ export function ClippingDashboard({
               </span>
             </h2>
             <div className="flex items-center gap-2 text-xs text-slate-400">
+              <span
+                className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 font-medium text-slate-600"
+                title={
+                  data?.destination?.id
+                    ? `Drive folder ID: ${data.destination.id}`
+                    : "Destination not configured — using Python script default. Set HANDOFF_DRIVE_FOLDER_ID in .env to override."
+                }
+              >
+                <FolderUp className="h-3.5 w-3.5" />
+                Uploads to: {destinationName}/
+              </span>
               {selected.size > 0 ? (
                 <button
                   type="button"
@@ -1493,36 +1521,38 @@ export function ClippingDashboard({
                         <span className="text-slate-500">
                           ({mainCount})
                         </span>
-                        <button
-                          type="button"
-                          // The button lives inside the <summary>, so
-                          // a click would toggle the <details>. Stop
-                          // propagation + preventDefault so we can
-                          // upload without collapsing the section.
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            void uploadMainToDrive(mainName, subGroupPayload);
-                          }}
-                          disabled={busy || mainCount === 0}
-                          title={
-                            `Upload all ${mainCount} clip(s) under "${mainName}" ` +
-                            `into Drive folder ${mainName}/<sub>_<date>/.`
-                          }
-                          className={clsx(
-                            "ml-auto inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium",
-                            busy
-                              ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                              : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
-                          )}
-                        >
-                          {busy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <FolderUp className="h-3.5 w-3.5" />
-                          )}
-                          Upload to {mainName}/
-                        </button>
+                        {pipelineMissing ? null : (
+                          <button
+                            type="button"
+                            // The button lives inside the <summary>, so
+                            // a click would toggle the <details>. Stop
+                            // propagation + preventDefault so we can
+                            // upload without collapsing the section.
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void uploadMainToDrive(mainName, subGroupPayload);
+                            }}
+                            disabled={busy || mainCount === 0}
+                            title={
+                              `Upload all ${mainCount} clip(s) under "${mainName}" ` +
+                              `into Drive folder ${mainName}/<sub>_<date>/.`
+                            }
+                            className={clsx(
+                              "ml-auto inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium",
+                              busy
+                                ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                                : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
+                            )}
+                          >
+                            {busy ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <FolderUp className="h-3.5 w-3.5" />
+                            )}
+                            Upload to {mainName}/
+                          </button>
+                        )}
                       </summary>
                       {Array.from(subMap.entries()).map(
                         ([subName, dateMap]) => {
@@ -1612,7 +1642,7 @@ export function ClippingDashboard({
                                         <CheckCircle2 className="h-3.5 w-3.5" />
                                         On Drive
                                       </a>
-                                    ) : (
+                                    ) : pipelineMissing ? null : (
                                       <button
                                         type="button"
                                         onClick={() => void uploadOne(c.fileName)}

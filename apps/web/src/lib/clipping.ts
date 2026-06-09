@@ -48,6 +48,33 @@ export function venvPython(): string {
 }
 
 /**
+ * The destination Drive folder clipped videos get uploaded to (the
+ * "Robot Video Pipeline" hand-off folder). Sourced from env vars:
+ *   HANDOFF_DRIVE_FOLDER_ID    — the Drive folder ID (required to override)
+ *   HANDOFF_DRIVE_FOLDER_NAME  — display name (defaults to "Robot Video Pipeline")
+ *
+ * If HANDOFF_DRIVE_FOLDER_ID is unset, `id` is null and `handoffFolderArgs()`
+ * returns []. The Python upload scripts then fall back to their own
+ * hardcoded HANDOFF_FOLDER_ID constant — so this is purely additive.
+ */
+export type HandoffFolder = { id: string | null; name: string };
+
+export function getHandoffFolder(): HandoffFolder {
+  const rawId = (process.env.HANDOFF_DRIVE_FOLDER_ID ?? "").trim();
+  const rawName = (process.env.HANDOFF_DRIVE_FOLDER_NAME ?? "").trim();
+  return {
+    id: rawId.length > 0 ? rawId : null,
+    name: rawName.length > 0 ? rawName : "Robot Video Pipeline",
+  };
+}
+
+/** Returns ["--folder", id] when the env var is set; [] otherwise. */
+export function handoffFolderArgs(): string[] {
+  const { id } = getHandoffFolder();
+  return id ? ["--folder", id] : [];
+}
+
+/**
  * Open pipeline.db. Returns null if the DB doesn't exist yet (the user
  * hasn't run import_to_db.py once). Callers should fall back to scanning
  * the clips/ folder directly.
@@ -550,7 +577,10 @@ export function startClippingRun(opts?: {
 
       if (!opts?.skipUpload) {
         state.step = "upload_clips_to_drive";
-        const uploadCode = await runStep("upload_clips_to_drive.py");
+        const uploadCode = await runStep(
+          "upload_clips_to_drive.py",
+          handoffFolderArgs(),
+        );
         if (uploadCode !== 0) {
           state.step = "error";
           state.exitCode = uploadCode;
