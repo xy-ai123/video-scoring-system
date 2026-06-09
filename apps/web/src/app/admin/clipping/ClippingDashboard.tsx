@@ -138,6 +138,12 @@ function parseGroup(fileName: string): { group: string; date: string } {
   return { group: "Other", date: "—" };
 }
 
+// Where the actual Python clipping pipeline runs. When the dashboard
+// is open on production (Railway) and the local pipeline isn't reachable,
+// the clipping buttons stay visible but redirect here in a new tab —
+// keeps the workflow obvious to operators who land on prod by mistake.
+const LOCAL_OPERATOR_URL = "http://localhost:3000/admin/clipping";
+
 const STEP_LABELS: Record<RunState["step"], string> = {
   idle: "idle",
   pull_from_drive: "Step 1/4 — pulling raw videos from Drive folder",
@@ -871,26 +877,38 @@ export function ClippingDashboard({
 
       {/* Action bar */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
-        {pipelineMissing ? null : (
-          <button
-            type="button"
-            onClick={startRun}
-            disabled={!!run?.running}
-            className={clsx(
-              "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium",
-              run?.running
-                ? "cursor-not-allowed bg-slate-100 text-slate-400"
-                : "bg-slate-900 text-white hover:bg-slate-700",
-            )}
-          >
-            {run?.running ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-            {run?.running ? "Running…" : "Run clipping now"}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={
+            pipelineMissing
+              ? () =>
+                  window.open(
+                    LOCAL_OPERATOR_URL,
+                    "_blank",
+                    "noopener,noreferrer",
+                  )
+              : startRun
+          }
+          disabled={!pipelineMissing && !!run?.running}
+          title={
+            pipelineMissing
+              ? `Clipping runs on the local operator instance. Click to open ${LOCAL_OPERATOR_URL} in a new tab.`
+              : undefined
+          }
+          className={clsx(
+            "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium",
+            !pipelineMissing && run?.running
+              ? "cursor-not-allowed bg-slate-100 text-slate-400"
+              : "bg-slate-900 text-white hover:bg-slate-700",
+          )}
+        >
+          {run?.running && !pipelineMissing ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Play className="h-4 w-4" />
+          )}
+          {run?.running && !pipelineMissing ? "Running…" : "Run clipping now"}
+        </button>
         <button
           type="button"
           onClick={() => void refresh({ fromUserClick: true })}
@@ -1094,32 +1112,43 @@ export function ClippingDashboard({
               </span>
             </h2>
             <div className="flex items-center gap-2 text-xs text-slate-400">
-              {rawSelected.size + formSelected.size > 0 && !pipelineMissing ? (
+              {rawSelected.size + formSelected.size > 0 ? (
                 <>
                   <button
                     type="button"
-                    onClick={() => void clipSelectedRaw()}
-                    disabled={!!run?.running}
+                    onClick={
+                      pipelineMissing
+                        ? () =>
+                            window.open(
+                              LOCAL_OPERATOR_URL,
+                              "_blank",
+                              "noopener,noreferrer",
+                            )
+                        : () => void clipSelectedRaw()
+                    }
+                    disabled={!pipelineMissing && !!run?.running}
                     className={clsx(
                       "inline-flex items-center gap-1 rounded-md border px-2 py-1 font-medium",
-                      run?.running
+                      !pipelineMissing && run?.running
                         ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
                         : "border-slate-200 bg-slate-900 text-white hover:bg-slate-700",
                     )}
                     title={
-                      formSelected.size > 0
+                      pipelineMissing
+                        ? `Clipping runs on the local operator instance. Click to open ${LOCAL_OPERATOR_URL} in a new tab and pick your selection there.`
+                        : formSelected.size > 0
                         ? "Download (if needed) + clip the selected FORM/RAW videos only"
                         : "Run detect_hands.py on the selected RAW videos only"
                     }
                   >
-                    {run?.running ? (
+                    {run?.running && !pipelineMissing ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
                       <Play className="h-3.5 w-3.5" />
                     )}
                     Clip {rawSelected.size + formSelected.size}
                   </button>
-                  {rawSelected.size > 0 ? (
+                  {rawSelected.size > 0 && !pipelineMissing ? (
                     <button
                       type="button"
                       onClick={() => void deleteSelectedRaw()}
