@@ -11,6 +11,7 @@ import {
   Search,
   Square,
   Trash2,
+  UserCog,
   X,
 } from "lucide-react";
 import { FormattedDate } from "@/components/FormattedDate";
@@ -76,6 +77,11 @@ export function PhonesTable({ phones }: { phones: PhoneTableRow[] }) {
   // date", changes their mind, opens "delete" — shouldn't carry over).
   const [bulkEditDateOpen, setBulkEditDateOpen] = useState(false);
   const [bulkEditDateDraft, setBulkEditDateDraft] = useState<string>("");
+  // Bulk assigned-user editor. Symmetric with bulkEditDate above —
+  // independent draft + open state so opening one dialog doesn't leak
+  // state into the other. Empty draft = clear the field on save.
+  const [bulkEditUserOpen, setBulkEditUserOpen] = useState(false);
+  const [bulkEditUserDraft, setBulkEditUserDraft] = useState<string>("");
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
 
   const filtered = useMemo(() => {
@@ -249,6 +255,50 @@ export function PhonesTable({ phones }: { phones: PhoneTableRow[] }) {
       clearSelection();
       setBulkEditDateOpen(false);
       setBulkEditDateDraft("");
+      startTransition(() => router.refresh());
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  /**
+   * Set `assignedUser` on every selected phone, without touching their
+   * rented-out flag or rent-out date. Empty draft clears the field —
+   * mirrors the bulk-date "empty clears" convention.
+   */
+  async function submitBulkUser() {
+    setBulkError(null);
+    setBulkBusy(true);
+    try {
+      const internals = Array.from(selected);
+      const res = await fetch("/api/phones/bulk-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ internals, assignedUser: bulkEditUserDraft }),
+      });
+      const data = await res
+        .json()
+        .catch(() => null as null | Record<string, unknown>);
+      if (!res.ok) {
+        throw new Error(
+          (data?.error as string | undefined) ?? `Request failed (${res.status})`,
+        );
+      }
+      const updated = (data?.updated as number | undefined) ?? 0;
+      const skipped = (data?.skipped as number | undefined) ?? 0;
+      const trimmed = bulkEditUserDraft.trim();
+      setBulkMessage(
+        `Updated assigned user on ${updated} phone${
+          updated === 1 ? "" : "s"
+        }${trimmed ? ` to "${trimmed}"` : " (cleared)"}${
+          skipped > 0 ? ` (${skipped} unchanged)` : ""
+        }.`,
+      );
+      clearSelection();
+      setBulkEditUserOpen(false);
+      setBulkEditUserDraft("");
       startTransition(() => router.refresh());
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : "Unknown error");
@@ -476,6 +526,22 @@ export function PhonesTable({ phones }: { phones: PhoneTableRow[] }) {
             >
               <CalendarClock className="h-3.5 w-3.5" />
               Edit rent-out date
+            </button>
+            {/* Bulk "Set assigned user" — same styling family as the other
+                neutral bulk-edit buttons (border-slate-300). Opens a
+                dialog with a single text input; empty save clears the
+                field on every selected phone, matching bulk-date. */}
+            <button
+              type="button"
+              onClick={() => {
+                setBulkEditUserDraft("");
+                setBulkEditUserOpen(true);
+              }}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              <UserCog className="h-3.5 w-3.5" />
+              Set assigned user
             </button>
             <button
               type="button"
@@ -915,6 +981,104 @@ export function PhonesTable({ phones }: { phones: PhoneTableRow[] }) {
                 {bulkEditDateDraft.trim().length > 0
                   ? `Update date on ${selected.size}`
                   : `Clear date on ${selected.size}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Bulk "Set assigned user" dialog. Updates assignedUser only —
+          leaves rentedOut and rentedAt alone. Empty input clears the
+          field on every selected phone (matches bulk-date behaviour). */}
+      {bulkEditUserOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !bulkBusy) {
+              setBulkEditUserOpen(false);
+            }
+          }}
+        >
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-slate-900">
+                Set assigned user for selected phones
+              </h3>
+              <button
+                type="button"
+                onClick={() => setBulkEditUserOpen(false)}
+                disabled={bulkBusy}
+                className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <p className="mt-2 text-sm text-slate-600">
+              Sets the Assigned User on{" "}
+              <span className="font-medium text-slate-900">
+                {selected.size} phone{selected.size === 1 ? "" : "s"}
+              </span>{" "}
+              ({Array.from(selected).slice(0, 5).join(", ")}
+              {selected.size > 5 ? `, +${selected.size - 5} more` : ""}).
+              The rented-out status and rent-out date are left unchanged.
+            </p>
+
+            <div className="mt-4">
+              <label
+                htmlFor="vss-phones-bulk-edituser"
+                className="block text-xs font-medium uppercase tracking-wide text-slate-500"
+              >
+                Assigned User
+              </label>
+              <input
+                id="vss-phones-bulk-edituser"
+                type="text"
+                value={bulkEditUserDraft}
+                onChange={(e) => setBulkEditUserDraft(e.target.value)}
+                placeholder="e.g. Alice / Bob / 张三"
+                autoComplete="off"
+                maxLength={120}
+                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Leave blank to clear the assigned user on every selected
+                phone.
+              </p>
+            </div>
+
+            {bulkError ? (
+              <div className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                {bulkError}
+              </div>
+            ) : null}
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setBulkEditUserOpen(false)}
+                disabled={bulkBusy}
+                className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitBulkUser()}
+                disabled={bulkBusy || selected.size === 0}
+                className="inline-flex items-center gap-1.5 rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-brand-700 disabled:opacity-50 disabled:hover:bg-brand-600"
+              >
+                {bulkBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <UserCog className="h-4 w-4" />
+                )}
+                {bulkEditUserDraft.trim().length > 0
+                  ? `Update user on ${selected.size}`
+                  : `Clear user on ${selected.size}`}
               </button>
             </div>
           </div>
