@@ -459,6 +459,72 @@ export async function softDeleteMissingZipSubmissions(
   return deleted;
 }
 
+/**
+ * Hard cap on the number of ZIPs we'll download + extract in a single
+ * sync run. Each robot-capture ZIP can be 1-3 GB; processing more than
+ * one per run pushed Railway's worker over its memory limit (exit 137
+ * SIGKILL) even after the in-memory→disk download refactor (tmpfs on
+ * `/tmp` means file bytes still count toward container RAM).
+ *
+ * 1 ZIP per run drains the backlog at ~5-min cadence via the auto-sync
+ * timer (or as fast as the operator clicks Sync Drive). 5 pending ZIPs
+ * → ~25 min worst-case before all are ingested. The trade-off: each
+ * tick stays well under any reasonable memory ceiling.
+ *
+ * Tunable via env var so the operator can dial it up if they later
+ * bump the Railway plan (e.g. AUTO_ZIP_LIMIT=3).
+ */
+const ZIP_INGEST_PER_RUN_LIMIT = (() => {
+  const raw = process.env.AUTO_ZIP_LIMIT;
+  const parsed = raw ? Number(raw) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 100) {
+    return Math.floor(parsed);
+  }
+  return 1;
+})();
+
+/**
+ * Skip ZIPs we've already started processing. Heuristic: if ANY
+ * Submission exists whose responseId matches `zip-<zipFileId>-`, this
+ * ZIP has been opened at least once in a past sync — we won't re-do
+ * the multi-GB download just to find every entry is already known.
+ *
+ * Trade-off: a ZIP that was partially ingested (a few entries written
+ * before an OOM kill) is treated as "done" and never re-tried. Given
+ * that the new disk-stream-and-cap path makes ingestion atomic per
+ * ZIP (download → open → loop), partial states are rare; if they do
+ * happen, the operator can manually soft-delete the partial entries
+ * and the ZIP will re-qualify next sync.
+ */
+async function filterAlreadyStartedZips(
+  zips: ZipFileMeta[],
+): Promise<{ pending: ZipFileMeta[]; alreadyProcessed: number }> {
+  if (zips.length === 0) return { pending: [], alreadyProcessed: 0 };
+  // Fetch every live ZIP-derived submission and bucket the responseIds
+  // by ZIP file id. The total set is small (hundreds), so O(N*M) match
+  // is fine; using Prisma's `startsWith` per-zip in a giant OR would
+  // be no faster than one bounded `startsWith: "zip-"` query + a
+  // local loop.
+  const allZipSubs = await prisma.submission.findMany({
+    where: { responseId: { startsWith: "zip-" }, deletedAt: null },
+    select: { responseId: true },
+  });
+  const seenZipIds = new Set<string>();
+  for (const s of allZipSubs) {
+    // responseId shape: `zip-<zipFileId>-<entryName>`. Drive file ids
+    // can contain dashes, so a regex would be ambiguous — just check
+    // each known zip id and see if responseId starts with `zip-<id>-`.
+    for (const z of zips) {
+      if (s.responseId.startsWith(`zip-${z.id}-`)) {
+        seenZipIds.add(z.id);
+        break;
+      }
+    }
+  }
+  const pending = zips.filter((z) => !seenZipIds.has(z.id));
+  return { pending, alreadyProcessed: seenZipIds.size };
+}
+
 export async function ingestZipsFromSharedDrives(): Promise<ZipIngestSummary> {
   const zips = await listZipsInSharedFolders();
   const summary: ZipIngestSummary = {
@@ -472,7 +538,29 @@ export async function ingestZipsFromSharedDrives(): Promise<ZipIngestSummary> {
     errors: 0,
   };
   logger.info({ count: zips.length }, "zip ingest: found ZIPs");
-  for (const zip of zips) {
+
+  // Skip ZIPs that already have entries in the DB so we don't burn a
+  // multi-GB download just to find everything already exists. Then cap
+  // the remaining list to the per-run limit so a backlog of large ZIPs
+  // can't OOM the worker in a single sync tick.
+  const { pending, alreadyProcessed } = await filterAlreadyStartedZips(zips);
+  // Deterministic ordering — by Drive ID. Drive IDs are 33-char strings
+  // and sort lexicographically; doesn't matter what the order means as
+  // long as it's stable, so the same ZIP gets retried first next run.
+  const ordered = [...pending].sort((a, b) => a.id.localeCompare(b.id));
+  const batch = ordered.slice(0, ZIP_INGEST_PER_RUN_LIMIT);
+  logger.info(
+    {
+      total: zips.length,
+      alreadyProcessed,
+      pending: pending.length,
+      thisRun: batch.length,
+      limit: ZIP_INGEST_PER_RUN_LIMIT,
+    },
+    "zip ingest: per-run batch picked",
+  );
+
+  for (const zip of batch) {
     try {
       await ingestOneZip(zip, summary);
     } catch (err) {
