@@ -24,6 +24,10 @@
  */
 import AdmZip from "adm-zip";
 import { Readable } from "node:stream";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { prisma } from "@vss/db";
 import { getDriveClient, downloadFile } from "./drive.js";
 import {
@@ -59,28 +63,83 @@ export type ZipIngestSummary = {
 };
 
 /**
- * Stream a Drive file into memory. We need a full Buffer because adm-zip
- * does random-access reads from the central directory at the *end* of the
- * archive — streaming a ZIP is awkward. Caps memory at ~500 MB to keep
- * one runaway upload from OOM-ing the worker.
+ * Cap for the total size of a single ZIP we'll try to ingest. Bumped from
+ * 512 MB (in-memory) to 3 GB now that downloads stream to /tmp instead of
+ * RAM. Robot-capture ZIPs with depth + RGB + IMU regularly hit 1-2 GB,
+ * and 3 GB leaves headroom for Railway's ephemeral disk (typically
+ * 5-10 GB available, only one ZIP-on-disk at a time per worker).
  */
-async function downloadToBuffer(
+const ZIP_DOWNLOAD_CAP_BYTES = 3 * 1024 * 1024 * 1024;
+
+/**
+ * Stream a Drive ZIP into a temp file under /tmp. The OLD approach
+ * accumulated the entire archive into a Node Buffer — convenient for
+ * AdmZip but it OOM-killed the sync subprocess whenever Phase 2
+ * encountered a >512 MB ZIP, taking unrelated work down with it.
+ *
+ * Streaming to disk means peak RAM is the size of ONE zip-entry being
+ * read (rgb.mp4 ≈ tens of MB), not the whole archive. AdmZip accepts
+ * a file path; it then mmaps / random-access-reads the file from disk,
+ * so the central-directory-at-end constraint is satisfied without
+ * holding the whole archive in memory.
+ *
+ * Returns the path on disk + a cleanup callback. Caller MUST call
+ * cleanup in a `finally` so we don't leak /tmp files when something
+ * later throws.
+ */
+async function downloadToTempFile(
   fileId: string,
-  capBytes = 512 * 1024 * 1024,
-): Promise<Buffer> {
-  const { stream } = await downloadFile(fileId);
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of stream as AsyncIterable<Buffer>) {
-    chunks.push(chunk);
-    total += chunk.length;
-    if (total > capBytes) {
-      throw new Error(
-        `ZIP exceeds ${capBytes} byte cap while downloading (${total} so far)`,
-      );
+  capBytes = ZIP_DOWNLOAD_CAP_BYTES,
+): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const dir = await mkdtemp(join(tmpdir(), "vss-zip-"));
+  const path = join(dir, `${fileId}.zip`);
+  const cleanup = async (): Promise<void> => {
+    // recursive+force so a half-written file doesn't block cleanup.
+    await rm(dir, { recursive: true, force: true }).catch(() => {
+      /* ignore — temp file cleanup is best-effort */
+    });
+  };
+  try {
+    const { stream } = await downloadFile(fileId);
+    const writeStream = createWriteStream(path);
+    // Pump Drive → disk, counting bytes so we can throw on cap breach
+    // before /tmp fills up. Backpressure via writeStream.write()'s
+    // return value keeps Node's heap from ballooning if the disk is
+    // slower than the network.
+    let total = 0;
+    try {
+      for await (const chunk of stream as AsyncIterable<Buffer>) {
+        total += chunk.length;
+        if (total > capBytes) {
+          throw new Error(
+            `ZIP exceeds ${capBytes} byte cap while downloading (${total} so far)`,
+          );
+        }
+        if (!writeStream.write(chunk)) {
+          await new Promise<void>((resolve) =>
+            writeStream.once("drain", resolve),
+          );
+        }
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        writeStream.end((err?: NodeJS.ErrnoException | null) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
     }
+    // Sanity check — confirm the file is on disk and non-empty before
+    // handing the path to AdmZip.
+    const st = await stat(path);
+    if (st.size === 0) {
+      throw new Error("downloaded ZIP is empty");
+    }
+    return { path, cleanup };
+  } catch (err) {
+    await cleanup();
+    throw err;
   }
-  return Buffer.concat(chunks);
 }
 
 async function measureDurationFromBuffer(buf: Buffer): Promise<number | null> {
@@ -164,9 +223,13 @@ async function ingestOneZip(
 ): Promise<void> {
   const log = logger.child({ zipFileId: zip.id, zipName: zip.name });
   log.info({ folder: zip.parentFolderName }, "zip ingest: downloading");
-  let buf: Buffer;
+  // Download to /tmp (not RAM) so a multi-GB ZIP doesn't OOM the
+  // subprocess. The cleanup() callback is invoked in the finally below
+  // regardless of how this function exits — early-return on error
+  // paths, mid-loop throw, normal completion, all hit it.
+  let temp: { path: string; cleanup: () => Promise<void> };
   try {
-    buf = await downloadToBuffer(zip.id);
+    temp = await downloadToTempFile(zip.id);
   } catch (err) {
     summary.errors += 1;
     const message = err instanceof Error ? err.message : String(err);
@@ -175,9 +238,31 @@ async function ingestOneZip(
   }
   summary.zipsExtracted += 1;
 
+  try {
+    await processOneZipFromDisk(zip, temp.path, summary, log);
+  } finally {
+    await temp.cleanup();
+  }
+}
+
+/**
+ * The body of `ingestOneZip` after the file is sitting on /tmp. Kept
+ * as a separate function so the caller can wrap the whole thing in a
+ * single try/finally for cleanup without nesting the existing branchy
+ * "skip / measure / persist" loop another level deep.
+ */
+async function processOneZipFromDisk(
+  zip: ZipFileMeta,
+  zipPath: string,
+  summary: ZipIngestSummary,
+  log: typeof logger,
+): Promise<void> {
   let archive: AdmZip;
   try {
-    archive = new AdmZip(buf);
+    // AdmZip can take a file path directly — it then reads the central
+    // directory at the END of the file via random-access (fs.readSync
+    // with offsets), so the whole archive never has to live in memory.
+    archive = new AdmZip(zipPath);
   } catch (err) {
     summary.errors += 1;
     const message = err instanceof Error ? err.message : String(err);
